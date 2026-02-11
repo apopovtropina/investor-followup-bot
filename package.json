@@ -1,0 +1,20 @@
+{
+  "name": "investor-followup-bot",
+  "version": "1.0.0",
+  "description": "Automated investor follow-up tracking bot for Elite Capital Group",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.24.0",
+    "@slack/bolt": "^3.17.0",
+    "chrono-node": "^2.7.0",
+    "dotenv": "^16.4.0",
+    "express": "^4.18.0",
+    "fuse.js": "^7.0.0",
+    "node-cron": "^3.0.3",
+    "nodemailer": "^6.9.0"
+  }
+}
