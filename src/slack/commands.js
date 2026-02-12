@@ -16,10 +16,10 @@ const { addReminder } = require('../reminders/store');
 const messages = require('./messages');
 
 // ---------------------------------------------------------------------------
-// Channel ID cache
+// Channel ID — use hardcoded ID from config, fall back to API lookup
 // ---------------------------------------------------------------------------
 
-let channelId = null;
+let channelId = config.slack.channelId || null;
 
 async function getChannelId(client) {
   if (channelId) return channelId;
@@ -38,6 +38,7 @@ async function getChannelId(client) {
       );
       if (match) {
         channelId = match.id;
+        console.log(`[slack/commands] Resolved channel #${config.slack.channel} -> ${channelId}`);
         return channelId;
       }
 
@@ -166,6 +167,18 @@ async function findSlackUserByName(client, name) {
 // ---------------------------------------------------------------------------
 
 function registerCommands(app) {
+  // -------------------------------------------------------------------
+  // 0. CATCH-ALL MESSAGE LOGGER — logs every incoming message event
+  //    This MUST be registered first so we can diagnose event delivery.
+  // -------------------------------------------------------------------
+  app.message(async ({ message, client }) => {
+    const text = message.text || '(no text)';
+    const user = message.user || message.bot_id || 'unknown';
+    const channel = message.channel || 'unknown';
+    const subtype = message.subtype || 'none';
+    console.log(`[slack/messages] Received message: "${text}" from=${user} channel=${channel} subtype=${subtype}`);
+  });
+
   // -------------------------------------------------------------------
   // 1. Schedule follow-up
   //    "follow up [Name] tomorrow at 2pm"

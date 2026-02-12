@@ -6,6 +6,8 @@ module.exports = {
     signingSecret: process.env.SLACK_SIGNING_SECRET,
     appToken: process.env.SLACK_APP_TOKEN,
     channel: 'monday-investor-followups',
+    channelId: process.env.SLACK_CHANNEL_ID || 'C0ADB93MTLP',
+    botUserId: process.env.SLACK_BOT_USER_ID || 'U0AED6A08S2',
   },
 
   monday: {
