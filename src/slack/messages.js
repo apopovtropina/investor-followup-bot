@@ -295,19 +295,12 @@ function formatInvestorStatus(investor) {
  * @returns {string} Slack mrkdwn message
  */
 function formatReminderNotification(investor, user) {
-  const days = daysAgo(investor.lastContactDate);
-  const daysStr = days !== null ? `Last contacted ${days} days ago` : 'No contact date';
   const userMention = user.startsWith('U') ? `<@${user}>` : user;
+  const status = escapeSlackMrkdwn(investor.status || 'Unknown');
+  const deal = escapeSlackMrkdwn(investor.dealInterest || 'N/A');
+  const name = escapeSlackMrkdwn(investor.name);
 
-  const lines = [];
-  lines.push(`:bell: *Scheduled Reminder \u2014 ${userMention}*`);
-  lines.push(`Follow up with ${escapeSlackMrkdwn(investor.name)} (${escapeSlackMrkdwn(investor.status)}) is due now.`);
-  lines.push(
-    `${escapeSlackMrkdwn(investor.dealInterest || 'N/A')} | ${formatCurrency(investor.investmentInterest)} | ${daysStr}`
-  );
-  lines.push(`<${investor.link}|Open in Monday>`);
-
-  return lines.join('\n');
+  return `:alarm_clock: ${userMention} \u2014 Time to follow up with *${name}*! Status: ${status} | Deal Interest: ${deal} :point_right: <${investor.link}|Open in Monday>`;
 }
 
 // ---------------------------------------------------------------------------

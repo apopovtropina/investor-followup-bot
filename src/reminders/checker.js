@@ -42,11 +42,25 @@ function startReminderChecker(slackClient, channelId) {
           }
 
           if (!investor) {
-            console.warn(
-              `[reminders/checker] Could not find investor "${reminder.investorName}" (item ${reminder.itemId}) — skipping`
-            );
-            removeReminder(reminder.id);
-            continue;
+            // Use stored context from the reminder as a fallback
+            if (reminder.investorLink) {
+              console.warn(
+                `[reminders/checker] Investor "${reminder.investorName}" not found in Monday.com — using stored context`
+              );
+              investor = {
+                name: reminder.investorName,
+                id: reminder.itemId,
+                status: reminder.investorStatus || 'Unknown',
+                dealInterest: reminder.dealInterest || 'N/A',
+                link: reminder.investorLink,
+              };
+            } else {
+              console.warn(
+                `[reminders/checker] Could not find investor "${reminder.investorName}" (item ${reminder.itemId}) and no stored context — skipping`
+              );
+              removeReminder(reminder.id);
+              continue;
+            }
           }
 
           // Generate AI suggestion

@@ -191,9 +191,11 @@ function registerCommands(app) {
   //    "remind me to follow up with [Name] tomorrow"
   // -------------------------------------------------------------------
 
-  // Date tail pattern — reused across follow-up regexes
+  // Date tail pattern — reused across follow-up regexes.
+  // Must capture full time expressions like "today at 5pm CST" or "tomorrow at 2pm".
+  // The key: "today" and "tomorrow" may be followed by "at <time>" so we use .* after them.
   const dateTail =
-    '(tomorrow|today|next\\s+\\w+|on\\s+.+?|in\\s+.+?|(?:at\\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday).*)$';
+    '((?:tomorrow|today)(?:\\s+at\\s+.+)?|next\\s+.+|on\\s+.+|in\\s+.+|(?:at\\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday).*)$';
 
   // Original: "follow up [Name] [date]"
   const followUpPattern = new RegExp(
@@ -270,7 +272,7 @@ function registerCommands(app) {
         return;
       }
 
-      // Store reminder
+      // Store reminder with investor context for the notification
       try {
         const userInfo = await client.users.info({ user: message.user });
         const email = userInfo.user.profile.email || null;
@@ -281,14 +283,24 @@ function registerCommands(app) {
           scheduledAt: parsedDate,
           slackUserId: message.user,
           userEmail: email,
+          investorStatus: investor.status,
+          dealInterest: investor.dealInterest,
+          investorLink: investor.link,
         });
       } catch (reminderErr) {
         console.error('[slack/commands] Failed to store reminder:', reminderErr.message);
         // Non-fatal: still confirm the follow-up was set
       }
 
+      // Include time in confirmation if the user specified one
+      const hasTime = dateExpression.match(/\d{1,2}\s*(?:am|pm|:\d{2})/i);
+      let timeStr = '';
+      if (hasTime) {
+        timeStr = ` at ${parsedDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: config.timezone, timeZoneName: 'short' })}`;
+      }
+
       await say(
-        `:white_check_mark: Got it! Follow-up with *${escapeSlackMrkdwn(investor.name)}* scheduled for *${formatDateReadable(parsedDate)}* (${dateStr}).\nMonday.com has been updated. <${investor.link}|Open in Monday>`
+        `:white_check_mark: Got it! Follow-up with *${escapeSlackMrkdwn(investor.name)}* scheduled for *${formatDateReadable(parsedDate)}*${timeStr} (${dateStr}).\nMonday.com has been updated.${hasTime ? ' :alarm_clock: I\'ll remind you at that time.' : ''} <${investor.link}|Open in Monday>`
       );
     } catch (err) {
       console.error('[slack/commands] handleScheduleFollowUp error:', err.message);
@@ -346,7 +358,7 @@ function registerCommands(app) {
         return;
       }
 
-      // Store reminder for the team member
+      // Store reminder for the team member with investor context
       const email = teamMember.profile.email || null;
       addReminder({
         itemId: investor.id,
@@ -354,6 +366,9 @@ function registerCommands(app) {
         scheduledAt: parsedDate,
         slackUserId: teamMember.id,
         userEmail: email,
+        investorStatus: investor.status,
+        dealInterest: investor.dealInterest,
+        investorLink: investor.link,
       });
 
       await say(

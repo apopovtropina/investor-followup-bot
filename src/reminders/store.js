@@ -28,7 +28,7 @@ function saveReminders() {
   }
 }
 
-function addReminder({ investorName, itemId, scheduledAt, slackUserId, userEmail }) {
+function addReminder({ investorName, itemId, scheduledAt, slackUserId, userEmail, investorStatus, dealInterest, investorLink }) {
   // scheduledAt should be a Date object or ISO string
   const reminder = {
     id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
@@ -37,11 +37,14 @@ function addReminder({ investorName, itemId, scheduledAt, slackUserId, userEmail
     scheduledAt: new Date(scheduledAt).toISOString(),
     slackUserId,
     userEmail,
+    investorStatus: investorStatus || null,
+    dealInterest: dealInterest || null,
+    investorLink: investorLink || null,
     createdAt: new Date().toISOString(),
   };
   reminders.push(reminder);
   saveReminders();
-  console.log(`[reminders/store] Added reminder for ${investorName} at ${reminder.scheduledAt}`);
+  console.log(`[reminders/store] Added reminder for ${investorName} at ${reminder.scheduledAt} (user: ${slackUserId})`);
   return reminder;
 }
 
