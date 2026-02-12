@@ -46,6 +46,7 @@ const CHANGE_MULTIPLE_VALUES = `
 async function updateColumnValue(itemId, columnId, value) {
   try {
     console.log(`[monday/mutations] updateColumnValue: item=${itemId} col=${columnId} value=${value}`);
+    console.log(`[monday/mutations] boardId=${BOARD_ID} (type: ${typeof BOARD_ID}), itemId=${String(itemId)} (type: string)`);
     const data = await mondayApi(CHANGE_MULTIPLE_VALUES, {
       boardId: BOARD_ID,
       itemId: String(itemId),
@@ -54,8 +55,14 @@ async function updateColumnValue(itemId, columnId, value) {
     console.log(`[monday/mutations] updateColumnValue succeeded for item ${itemId}`);
     return data;
   } catch (err) {
-    console.error(`[monday/mutations] updateColumnValue failed for item ${itemId}:`, err.message);
-    console.error(`[monday/mutations] Full error:`, JSON.stringify(err.response?.data || err.cause || err));
+    console.error(`[monday/mutations] updateColumnValue FAILED for item ${itemId}:`, err.message);
+    console.error(`[monday/mutations] Error details:`, JSON.stringify({
+      graphqlErrors: err.graphqlErrors,
+      errorCode: err.errorCode,
+      statusCode: err.statusCode,
+      responseBody: err.responseBody,
+      stack: err.stack,
+    }, null, 2));
     return null;
   }
 }
@@ -72,6 +79,7 @@ async function updateNextFollowUp(itemId, dateStr) {
       [config.monday.columns.nextFollowUp]: { date: dateStr },
     });
     console.log(`[monday/mutations] updateNextFollowUp: item=${itemId} date=${dateStr} columnValues=${columnValues}`);
+    console.log(`[monday/mutations] boardId=${BOARD_ID}, column=${config.monday.columns.nextFollowUp}`);
 
     const data = await mondayApi(CHANGE_MULTIPLE_VALUES, {
       boardId: BOARD_ID,
@@ -81,8 +89,14 @@ async function updateNextFollowUp(itemId, dateStr) {
     console.log(`[monday/mutations] updateNextFollowUp succeeded for item ${itemId}`);
     return data;
   } catch (err) {
-    console.error(`[monday/mutations] updateNextFollowUp failed for item ${itemId}:`, err.message);
-    console.error(`[monday/mutations] Full error:`, JSON.stringify(err.response?.data || err.cause || err));
+    console.error(`[monday/mutations] updateNextFollowUp FAILED for item ${itemId}:`, err.message);
+    console.error(`[monday/mutations] Error details:`, JSON.stringify({
+      graphqlErrors: err.graphqlErrors,
+      errorCode: err.errorCode,
+      statusCode: err.statusCode,
+      responseBody: err.responseBody,
+      stack: err.stack,
+    }, null, 2));
     return null;
   }
 }
@@ -99,6 +113,7 @@ async function updateLastContactDate(itemId, dateStr) {
       [config.monday.columns.lastContactDate]: { date: dateStr },
     });
     console.log(`[monday/mutations] updateLastContactDate: item=${itemId} date=${dateStr} columnValues=${columnValues}`);
+    console.log(`[monday/mutations] boardId=${BOARD_ID}, column=${config.monday.columns.lastContactDate}`);
 
     const data = await mondayApi(CHANGE_MULTIPLE_VALUES, {
       boardId: BOARD_ID,
@@ -108,8 +123,14 @@ async function updateLastContactDate(itemId, dateStr) {
     console.log(`[monday/mutations] updateLastContactDate succeeded for item ${itemId}`);
     return data;
   } catch (err) {
-    console.error(`[monday/mutations] updateLastContactDate failed for item ${itemId}:`, err.message);
-    console.error(`[monday/mutations] Full error:`, JSON.stringify(err.response?.data || err.cause || err));
+    console.error(`[monday/mutations] updateLastContactDate FAILED for item ${itemId}:`, err.message);
+    console.error(`[monday/mutations] Error details:`, JSON.stringify({
+      graphqlErrors: err.graphqlErrors,
+      errorCode: err.errorCode,
+      statusCode: err.statusCode,
+      responseBody: err.responseBody,
+      stack: err.stack,
+    }, null, 2));
     return null;
   }
 }
@@ -132,8 +153,14 @@ async function updateItemName(itemId, newName) {
     console.log(`[monday/mutations] updateItemName succeeded for item ${itemId}`);
     return data;
   } catch (err) {
-    console.error(`[monday/mutations] updateItemName failed for item ${itemId}:`, err.message);
-    console.error(`[monday/mutations] Full error:`, JSON.stringify(err.response?.data || err.cause || err));
+    console.error(`[monday/mutations] updateItemName FAILED for item ${itemId}:`, err.message);
+    console.error(`[monday/mutations] Error details:`, JSON.stringify({
+      graphqlErrors: err.graphqlErrors,
+      errorCode: err.errorCode,
+      statusCode: err.statusCode,
+      responseBody: err.responseBody,
+      stack: err.stack,
+    }, null, 2));
     return null;
   }
 }
@@ -175,6 +202,44 @@ async function removeGoingColdFlag(itemId, currentName) {
   return updateItemName(itemId, newName);
 }
 
+/**
+ * Diagnostic test: attempts a minimal hardcoded write to Monday.com.
+ * Used to verify API token permissions and column_values format.
+ *
+ * @param {string|number} testItemId - Item ID to test with
+ * @returns {Promise<{ success: boolean, data?: object, error?: string }>}
+ */
+async function testMondayWrite(testItemId) {
+  const today = new Date();
+  const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+
+  const columnValues = JSON.stringify({
+    [config.monday.columns.lastContactDate]: { date: dateStr },
+  });
+
+  console.log('[monday/mutations] TEST WRITE starting...');
+  console.log(`[monday/mutations] TEST boardId=${BOARD_ID} itemId=${testItemId} columnValues=${columnValues}`);
+
+  try {
+    const data = await mondayApi(CHANGE_MULTIPLE_VALUES, {
+      boardId: BOARD_ID,
+      itemId: String(testItemId),
+      columnValues,
+    });
+    console.log('[monday/mutations] TEST WRITE succeeded:', JSON.stringify(data));
+    return { success: true, data };
+  } catch (err) {
+    console.error('[monday/mutations] TEST WRITE FAILED:', err.message);
+    console.error('[monday/mutations] TEST error details:', JSON.stringify({
+      graphqlErrors: err.graphqlErrors,
+      errorCode: err.errorCode,
+      statusCode: err.statusCode,
+      responseBody: err.responseBody,
+    }, null, 2));
+    return { success: false, error: err.message };
+  }
+}
+
 module.exports = {
   updateColumnValue,
   updateNextFollowUp,
@@ -182,4 +247,5 @@ module.exports = {
   updateItemName,
   addGoingColdFlag,
   removeGoingColdFlag,
+  testMondayWrite,
 };

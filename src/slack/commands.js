@@ -8,6 +8,7 @@ const {
   updateNextFollowUp,
   updateLastContactDate,
   removeGoingColdFlag,
+  testMondayWrite,
 } = require('../monday/mutations');
 const { findBestMatch } = require('../utils/nameMatch');
 const { escapeSlackMrkdwn } = require('../utils/helpers');
@@ -459,6 +460,42 @@ function registerCommands(app) {
     } catch (err) {
       console.error('[slack/commands] status check error:', err.message);
       await say('Something went wrong while looking up the investor. Please try again.');
+    }
+  });
+
+  // -------------------------------------------------------------------
+  // 6. Test Monday.com write access (diagnostic)
+  //    "test monday" — picks the first active investor and attempts a write
+  // -------------------------------------------------------------------
+  const testMondayPattern = /^test\s+monday$/i;
+
+  app.message(testMondayPattern, async ({ message, context, client, say }) => {
+    if (!shouldProcess(message)) return;
+    if (!(await isCorrectChannel(message, client))) return;
+
+    try {
+      await say(':wrench: Running Monday.com write test...');
+
+      // Get first active investor to use as test target
+      const investors = await getActiveInvestors();
+      if (!investors || investors.length === 0) {
+        await say(':x: No active investors found — cannot run test.');
+        return;
+      }
+
+      const testInvestor = investors[0];
+      await say(`:mag: Testing write on item: *${escapeSlackMrkdwn(testInvestor.name)}* (ID: ${testInvestor.id})`);
+
+      const result = await testMondayWrite(testInvestor.id);
+
+      if (result.success) {
+        await say(`:white_check_mark: Monday.com write test PASSED! Response: \`${JSON.stringify(result.data)}\``);
+      } else {
+        await say(`:x: Monday.com write test FAILED!\nError: \`${result.error}\`\nCheck Railway logs for full details.`);
+      }
+    } catch (err) {
+      console.error('[slack/commands] test monday error:', err.message);
+      await say(`:x: Test crashed: \`${err.message}\``);
     }
   });
 }
