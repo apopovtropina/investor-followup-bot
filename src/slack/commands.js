@@ -73,6 +73,23 @@ function formatDateReadable(date) {
 }
 
 /**
+ * Strip common prepositions / filler words from the beginning of an extracted
+ * investor name. Regex captures sometimes include "with", "for", etc.
+ */
+function stripNamePrefix(name) {
+  return name
+    .replace(/^(?:with|for|on|about|regarding)\s+/i, '')
+    .trim();
+}
+
+/**
+ * Strip trailing punctuation (?, !, .) from a date expression.
+ */
+function stripTrailingPunctuation(expr) {
+  return expr.replace(/[?!.]+$/, '').trim();
+}
+
+/**
  * Determine if a message should be processed by this bot.
  * Only respond in the configured channel and ignore bot messages.
  */
@@ -193,9 +210,9 @@ function registerCommands(app) {
 
   // Date tail pattern — reused across follow-up regexes.
   // Must capture full time expressions like "today at 5pm CST" or "tomorrow at 2pm".
-  // The key: "today" and "tomorrow" may be followed by "at <time>" so we use .* after them.
+  // The optional leading "for" handles "for today at 5pm" → captures "today at 5pm".
   const dateTail =
-    '((?:tomorrow|today)(?:\\s+at\\s+.+)?|next\\s+.+|on\\s+.+|in\\s+.+|(?:at\\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday).*)$';
+    '(?:for\\s+)?((?:tomorrow|today)(?:\\s+at\\s+.+)?|next\\s+.+|on\\s+.+|in\\s+.+|(?:at\\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday).*)$';
 
   // Original: "follow up [Name] [date]"
   const followUpPattern = new RegExp(
@@ -206,21 +223,21 @@ function registerCommands(app) {
   const addFollowUpPattern =
     /add\s+(.+?)\s+for\s+follow[\s-]*up\s+(?:on\s+)?(.+)$/i;
 
-  // "can we set a follow up for [Name] [date]"
-  // "set a followup for [Name] [date]"
+  // "can we/you set a follow up for/with [Name] [date]"
+  // "set a followup for/with [Name] [date]"
   // "set followup for [Name] [date]"
   const setFollowUpPattern = new RegExp(
-    '(?:can\\s+we\\s+)?set\\s+(?:a\\s+)?follow[\\s-]*up\\s+for\\s+(.+?)\\s+' + dateTail, 'i'
+    '(?:can\\s+(?:we|you)\\s+)?set\\s+(?:a\\s+)?follow[\\s-]*up\\s+(?:for|with)\\s+(.+?)\\s+' + dateTail, 'i'
   );
 
-  // "schedule a follow up for [Name] [date]"
+  // "schedule a follow up for/with [Name] [date]"
   const scheduleFollowUpPattern = new RegExp(
-    'schedule\\s+(?:a\\s+)?follow[\\s-]*up\\s+for\\s+(.+?)\\s+' + dateTail, 'i'
+    'schedule\\s+(?:a\\s+)?follow[\\s-]*up\\s+(?:for|with)\\s+(.+?)\\s+' + dateTail, 'i'
   );
 
-  // "remind me to follow up with [Name] [date]"
+  // "remind me to follow up with/on/for [Name] [date]"
   const remindFollowUpPattern = new RegExp(
-    'remind\\s+me\\s+to\\s+follow[\\s-]*up\\s+(?:with\\s+)?(.+?)\\s+' + dateTail, 'i'
+    'remind\\s+me\\s+to\\s+follow[\\s-]*up\\s+(?:with|on|for)\\s+(.+?)\\s+' + dateTail, 'i'
   );
 
   // All follow-up patterns share the same handler
@@ -240,8 +257,8 @@ function registerCommands(app) {
       const matches = message.text.match(pattern);
       if (!matches) return;
 
-      const searchName = matches[1].trim();
-      const dateExpression = matches[2].trim();
+      const searchName = stripNamePrefix(matches[1].trim());
+      const dateExpression = stripTrailingPunctuation(matches[2].trim());
 
       await handleScheduleFollowUp(searchName, dateExpression, message, client, say);
     });
@@ -324,8 +341,8 @@ function registerCommands(app) {
     if (!matches) return;
 
     const teamMemberName = matches[1].trim();
-    const searchName = matches[2].trim();
-    const dateExpression = matches[3].trim();
+    const searchName = stripNamePrefix(matches[2].trim());
+    const dateExpression = stripTrailingPunctuation(matches[3].trim());
 
     try {
       // Find the team member in Slack
