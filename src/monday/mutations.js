@@ -22,7 +22,7 @@ const CHANGE_SIMPLE_VALUE = `
 
 const CHANGE_MULTIPLE_VALUES = `
   mutation ($boardId: ID!, $itemId: ID!, $columnValues: JSON!) {
-    change_multiple_column_values_v2(
+    change_multiple_column_values(
       board_id: $boardId,
       item_id: $itemId,
       column_values: $columnValues
@@ -45,17 +45,17 @@ const CHANGE_MULTIPLE_VALUES = `
  */
 async function updateColumnValue(itemId, columnId, value) {
   try {
+    console.log(`[monday/mutations] updateColumnValue: item=${itemId} col=${columnId} value=${value}`);
     const data = await mondayApi(CHANGE_MULTIPLE_VALUES, {
       boardId: BOARD_ID,
       itemId: String(itemId),
       columnValues: value,
     });
+    console.log(`[monday/mutations] updateColumnValue succeeded for item ${itemId}`);
     return data;
   } catch (err) {
-    console.error(
-      `[monday/mutations] updateColumnValue failed for item ${itemId}:`,
-      err.message
-    );
+    console.error(`[monday/mutations] updateColumnValue failed for item ${itemId}:`, err.message);
+    console.error(`[monday/mutations] Full error:`, JSON.stringify(err.response?.data || err.cause || err));
     return null;
   }
 }
@@ -71,18 +71,18 @@ async function updateNextFollowUp(itemId, dateStr) {
     const columnValues = JSON.stringify({
       [config.monday.columns.nextFollowUp]: { date: dateStr },
     });
+    console.log(`[monday/mutations] updateNextFollowUp: item=${itemId} date=${dateStr} columnValues=${columnValues}`);
 
     const data = await mondayApi(CHANGE_MULTIPLE_VALUES, {
       boardId: BOARD_ID,
       itemId: String(itemId),
       columnValues,
     });
+    console.log(`[monday/mutations] updateNextFollowUp succeeded for item ${itemId}`);
     return data;
   } catch (err) {
-    console.error(
-      `[monday/mutations] updateNextFollowUp failed for item ${itemId}:`,
-      err.message
-    );
+    console.error(`[monday/mutations] updateNextFollowUp failed for item ${itemId}:`, err.message);
+    console.error(`[monday/mutations] Full error:`, JSON.stringify(err.response?.data || err.cause || err));
     return null;
   }
 }
@@ -98,18 +98,18 @@ async function updateLastContactDate(itemId, dateStr) {
     const columnValues = JSON.stringify({
       [config.monday.columns.lastContactDate]: { date: dateStr },
     });
+    console.log(`[monday/mutations] updateLastContactDate: item=${itemId} date=${dateStr} columnValues=${columnValues}`);
 
     const data = await mondayApi(CHANGE_MULTIPLE_VALUES, {
       boardId: BOARD_ID,
       itemId: String(itemId),
       columnValues,
     });
+    console.log(`[monday/mutations] updateLastContactDate succeeded for item ${itemId}`);
     return data;
   } catch (err) {
-    console.error(
-      `[monday/mutations] updateLastContactDate failed for item ${itemId}:`,
-      err.message
-    );
+    console.error(`[monday/mutations] updateLastContactDate failed for item ${itemId}:`, err.message);
+    console.error(`[monday/mutations] Full error:`, JSON.stringify(err.response?.data || err.cause || err));
     return null;
   }
 }
@@ -122,18 +122,18 @@ async function updateLastContactDate(itemId, dateStr) {
  */
 async function updateItemName(itemId, newName) {
   try {
+    console.log(`[monday/mutations] updateItemName: item=${itemId} newName="${newName}"`);
     const data = await mondayApi(CHANGE_SIMPLE_VALUE, {
       boardId: BOARD_ID,
       itemId: String(itemId),
       columnId: 'name',
       value: newName,
     });
+    console.log(`[monday/mutations] updateItemName succeeded for item ${itemId}`);
     return data;
   } catch (err) {
-    console.error(
-      `[monday/mutations] updateItemName failed for item ${itemId}:`,
-      err.message
-    );
+    console.error(`[monday/mutations] updateItemName failed for item ${itemId}:`, err.message);
+    console.error(`[monday/mutations] Full error:`, JSON.stringify(err.response?.data || err.cause || err));
     return null;
   }
 }

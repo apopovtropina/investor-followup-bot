@@ -24,6 +24,11 @@ async function start() {
   if (!config.slack.botToken) console.error('[startup] MISSING: SLACK_BOT_TOKEN');
   if (!config.slack.appToken) console.error('[startup] MISSING: SLACK_APP_TOKEN');
   if (!config.slack.signingSecret) console.error('[startup] MISSING: SLACK_SIGNING_SECRET');
+  if (!config.monday.apiToken) {
+    console.error('[startup] MISSING: MONDAY_API_TOKEN');
+  } else {
+    console.log(`[startup] MONDAY_API_TOKEN present: true (first 10 chars: ${config.monday.apiToken.substring(0, 10)}...)`);
+  }
   console.log(`[startup] SLACK_APP_TOKEN present: ${!!config.slack.appToken} (starts with xapp-: ${(config.slack.appToken || '').startsWith('xapp-')})`);
   console.log(`[startup] SLACK_BOT_TOKEN present: ${!!config.slack.botToken} (starts with xoxb-: ${(config.slack.botToken || '').startsWith('xoxb-')})`);
 
