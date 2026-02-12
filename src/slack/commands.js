@@ -182,39 +182,68 @@ function registerCommands(app) {
 
   // -------------------------------------------------------------------
   // 1. Schedule follow-up
+  //    Supported phrasings (follow-up / followup / follow up all work):
   //    "follow up [Name] tomorrow at 2pm"
   //    "add [Name] for follow-up on Friday"
+  //    "can we set a follow up for [Name] tomorrow"
+  //    "set followup for [Name] next Tuesday"
+  //    "schedule a follow up for [Name] on March 15"
+  //    "remind me to follow up with [Name] tomorrow"
   // -------------------------------------------------------------------
-  const followUpPattern =
-    /follow\s*up\s+(.+?)\s+(tomorrow|today|next\s+\w+|on\s+.+?|in\s+.+?|(?:at\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday).*)$/i;
+
+  // Date tail pattern — reused across follow-up regexes
+  const dateTail =
+    '(tomorrow|today|next\\s+\\w+|on\\s+.+?|in\\s+.+?|(?:at\\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday).*)$';
+
+  // Original: "follow up [Name] [date]"
+  const followUpPattern = new RegExp(
+    'follow[\\s-]*up\\s+(.+?)\\s+' + dateTail, 'i'
+  );
+
+  // "add [Name] for follow-up on [date]"
   const addFollowUpPattern =
-    /add\s+(.+?)\s+for\s+follow[- ]?up\s+(?:on\s+)?(.+)$/i;
+    /add\s+(.+?)\s+for\s+follow[\s-]*up\s+(?:on\s+)?(.+)$/i;
 
-  app.message(followUpPattern, async ({ message, context, client, say }) => {
-    if (!shouldProcess(message)) return;
-    if (!(await isCorrectChannel(message, client))) return;
+  // "can we set a follow up for [Name] [date]"
+  // "set a followup for [Name] [date]"
+  // "set followup for [Name] [date]"
+  const setFollowUpPattern = new RegExp(
+    '(?:can\\s+we\\s+)?set\\s+(?:a\\s+)?follow[\\s-]*up\\s+for\\s+(.+?)\\s+' + dateTail, 'i'
+  );
 
-    const matches = message.text.match(followUpPattern);
-    if (!matches) return;
+  // "schedule a follow up for [Name] [date]"
+  const scheduleFollowUpPattern = new RegExp(
+    'schedule\\s+(?:a\\s+)?follow[\\s-]*up\\s+for\\s+(.+?)\\s+' + dateTail, 'i'
+  );
 
-    const searchName = matches[1].trim();
-    const dateExpression = matches[2].trim();
+  // "remind me to follow up with [Name] [date]"
+  const remindFollowUpPattern = new RegExp(
+    'remind\\s+me\\s+to\\s+follow[\\s-]*up\\s+(?:with\\s+)?(.+?)\\s+' + dateTail, 'i'
+  );
 
-    await handleScheduleFollowUp(searchName, dateExpression, message, client, say);
-  });
+  // All follow-up patterns share the same handler
+  const followUpPatterns = [
+    followUpPattern,
+    addFollowUpPattern,
+    setFollowUpPattern,
+    scheduleFollowUpPattern,
+    remindFollowUpPattern,
+  ];
 
-  app.message(addFollowUpPattern, async ({ message, context, client, say }) => {
-    if (!shouldProcess(message)) return;
-    if (!(await isCorrectChannel(message, client))) return;
+  for (const pattern of followUpPatterns) {
+    app.message(pattern, async ({ message, context, client, say }) => {
+      if (!shouldProcess(message)) return;
+      if (!(await isCorrectChannel(message, client))) return;
 
-    const matches = message.text.match(addFollowUpPattern);
-    if (!matches) return;
+      const matches = message.text.match(pattern);
+      if (!matches) return;
 
-    const searchName = matches[1].trim();
-    const dateExpression = matches[2].trim();
+      const searchName = matches[1].trim();
+      const dateExpression = matches[2].trim();
 
-    await handleScheduleFollowUp(searchName, dateExpression, message, client, say);
-  });
+      await handleScheduleFollowUp(searchName, dateExpression, message, client, say);
+    });
+  }
 
   async function handleScheduleFollowUp(searchName, dateExpression, message, client, say) {
     try {
@@ -270,9 +299,10 @@ function registerCommands(app) {
   // -------------------------------------------------------------------
   // 2. Team member follow-up
   //    "Sarah follow up John Smith tomorrow"
+  //    "Sarah followup John Smith tomorrow"
   // -------------------------------------------------------------------
   const teamFollowUpPattern =
-    /^(\w+)\s+follow\s*up\s+(.+?)\s+(tomorrow|today|next\s+\w+|on\s+.+?|in\s+.+?)$/i;
+    /^(\w+)\s+follow[\s-]*up\s+(.+?)\s+(tomorrow|today|next\s+\w+|on\s+.+?|in\s+.+?)$/i;
 
   app.message(teamFollowUpPattern, async ({ message, context, client, say }) => {
     if (!shouldProcess(message)) return;
@@ -497,6 +527,43 @@ function registerCommands(app) {
       console.error('[slack/commands] test monday error:', err.message);
       await say(`:x: Test crashed: \`${err.message}\``);
     }
+  });
+
+  // -------------------------------------------------------------------
+  // 7. CATCH-ALL — reply with help when no command matched
+  //    Registered LAST so every other listener runs first.
+  // -------------------------------------------------------------------
+
+  // Collect all known patterns into one array for the catch-all check
+  const allKnownPatterns = [
+    ...followUpPatterns,
+    teamFollowUpPattern,
+    touchpointPattern,
+    overduePattern,
+    statusPattern,
+    testMondayPattern,
+  ];
+
+  app.message(async ({ message, client, say }) => {
+    if (!shouldProcess(message)) return;
+    if (!(await isCorrectChannel(message, client))) return;
+
+    const text = (message.text || '').trim();
+    if (!text) return;
+
+    // If any known pattern matches, another handler already dealt with it
+    const matched = allKnownPatterns.some((p) => p.test(text));
+    if (matched) return;
+
+    await say(
+      `:question: I didn't understand that. Here's what I can do:\n` +
+      `\u2022 *Schedule follow-up:* "follow up [Name] tomorrow" or "set a followup for [Name] next Tuesday"\n` +
+      `\u2022 *Log touchpoint:* "contacted [Name] today" or "spoke with [Name]"\n` +
+      `\u2022 *Check overdue:* "who's overdue"\n` +
+      `\u2022 *Investor status:* "status on [Name]" or "check on [Name]"\n` +
+      `\u2022 *Assign follow-up:* "[Team member] follow up [Name] tomorrow"\n` +
+      `\u2022 *Test connection:* "test monday"`
+    );
   });
 }
 
