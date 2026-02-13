@@ -1,5 +1,10 @@
 // ---------------------------------------------------------------------------
-// Slack command handlers — registered via app.message() listeners
+// Slack command handlers — NLU-powered with regex fallback
+// ---------------------------------------------------------------------------
+// Messages flow through this pipeline:
+//   1. Fast regex matching for well-known commands (zero latency)
+//   2. If no regex match → Anthropic NLU intent parsing (conversational)
+//   3. Route parsed intent to the appropriate handler
 // ---------------------------------------------------------------------------
 
 const config = require('../config');
@@ -9,11 +14,15 @@ const {
   updateLastContactDate,
   removeGoingColdFlag,
   testMondayWrite,
+  updateAssignedTo,
 } = require('../monday/mutations');
 const { findBestMatch } = require('../utils/nameMatch');
 const { escapeSlackMrkdwn } = require('../utils/helpers');
 const { parseNaturalDate } = require('../utils/dateParser');
 const { addReminder } = require('../reminders/store');
+const { parseIntent } = require('../ai/intentParser');
+const { resolveSlackUserToMonday, resolveNameToMonday } = require('../utils/userMapping');
+const { notifyAssignment } = require('./notifications');
 const messages = require('./messages');
 
 // ---------------------------------------------------------------------------
@@ -72,29 +81,7 @@ function formatDateReadable(date) {
   });
 }
 
-/**
- * Strip common prepositions / filler words from the beginning of an extracted
- * investor name. Regex captures sometimes include "with", "for", etc.
- */
-function stripNamePrefix(name) {
-  return name
-    .replace(/^(?:with|for|on|about|regarding)\s+/i, '')
-    .trim();
-}
-
-/**
- * Strip trailing punctuation (?, !, .) from a date expression.
- */
-function stripTrailingPunctuation(expr) {
-  return expr.replace(/[?!.]+$/, '').trim();
-}
-
-/**
- * Determine if a message should be processed by this bot.
- * Only respond in the configured channel and ignore bot messages.
- */
 function shouldProcess(message) {
-  // Ignore bot messages
   if (message.bot_id || message.subtype) return false;
   return true;
 }
@@ -107,9 +94,8 @@ async function isCorrectChannel(message, client) {
 
 /**
  * Resolve an investor name from message text using fuzzy matching.
- * Returns { investor, error } where error is a string to reply with if matching failed.
  */
-async function resolveInvestor(searchName, say) {
+async function resolveInvestor(searchName) {
   let investors;
   try {
     investors = await getActiveInvestors();
@@ -130,13 +116,12 @@ async function resolveInvestor(searchName, say) {
     };
   }
 
-  // Fuse.js: 0 = perfect match, 1 = no match. Reject poor matches.
   if (result.score > 0.35) {
     return {
       investor: null,
       error: `I couldn't find a close match for "${escapeSlackMrkdwn(searchName)}". Did you mean one of these?\n${investors
         .slice(0, 5)
-        .map((i) => `\u2022 ${i.name}`)
+        .map((i) => `• ${i.name}`)
         .join('\n')}`,
     };
   }
@@ -144,40 +129,373 @@ async function resolveInvestor(searchName, say) {
   return { investor: result.match, error: null };
 }
 
-/**
- * Look up a Slack team member by display name from the users list.
- */
-async function findSlackUserByName(client, name) {
-  try {
-    const lowerName = name.toLowerCase().trim();
-    let cursor;
+// ---------------------------------------------------------------------------
+// Fast regex patterns for direct matches (no AI call needed)
+// ---------------------------------------------------------------------------
 
-    do {
-      const result = await client.users.list({ limit: 200, cursor });
+const REGEX_PATTERNS = {
+  testMonday: /^test\s+monday$/i,
+  overdue: /(?:who'?s?\s+overdue|overdue\s+investors)/i,
+  statusCheck: /(?:status\s+on|check\s+on)\s+(.+)/i,
+  touchpoint: /(?:contacted|spoke\s+with|reached\s+out\s+to)\s+(.+?)(?:\s+today)?$/i,
+};
 
-      for (const user of result.members) {
-        if (user.deleted || user.is_bot) continue;
+// ---------------------------------------------------------------------------
+// Intent handlers — each handles one action type
+// ---------------------------------------------------------------------------
 
-        const displayName = (user.profile.display_name || '').toLowerCase();
-        const realName = (user.real_name || '').toLowerCase();
-        const firstName = realName.split(' ')[0];
-
-        if (
-          displayName === lowerName ||
-          realName === lowerName ||
-          firstName === lowerName
-        ) {
-          return user;
-        }
-      }
-
-      cursor = result.response_metadata && result.response_metadata.next_cursor;
-    } while (cursor);
-  } catch (err) {
-    console.error('[slack/commands] findSlackUserByName failed:', err.message);
+async function handleScheduleFollowUp(intent, message, client, say) {
+  const searchName = intent.investorName;
+  if (!searchName) {
+    await say("I'd love to help schedule a follow-up, but I need to know which investor. Could you include their name?");
+    return;
   }
 
-  return null;
+  const { investor, error } = await resolveInvestor(searchName);
+  if (error) { await say(error); return; }
+
+  // Parse date
+  const dateExpression = intent.date || 'tomorrow';
+  const parsedDate = parseNaturalDate(dateExpression);
+  if (!parsedDate) {
+    await say(`I couldn't figure out when you mean by "${escapeSlackMrkdwn(dateExpression)}". Try something like "tomorrow", "next Tuesday", or "Friday at 2pm".`);
+    return;
+  }
+
+  const dateStr = formatDateYMD(parsedDate);
+
+  // Update Monday.com
+  const result = await updateNextFollowUp(investor.id, dateStr);
+  if (!result) {
+    await say('Sorry, I could not update Monday.com. Please try again or update it manually.');
+    return;
+  }
+
+  // Store reminder
+  try {
+    const userInfo = await client.users.info({ user: message.user });
+    const email = userInfo.user.profile.email || null;
+
+    addReminder({
+      itemId: investor.id,
+      investorName: investor.name,
+      scheduledAt: parsedDate,
+      slackUserId: message.user,
+      userEmail: email,
+      investorStatus: investor.status,
+      dealInterest: investor.dealInterest,
+      investorLink: investor.link,
+    });
+  } catch (reminderErr) {
+    console.error('[slack/commands] Failed to store reminder:', reminderErr.message);
+  }
+
+  // Time display
+  const hasTime = dateExpression.match(/\d{1,2}\s*(?:am|pm|:\d{2})/i);
+  let timeStr = '';
+  if (hasTime) {
+    timeStr = ` at ${parsedDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: config.timezone, timeZoneName: 'short' })}`;
+  }
+
+  await say(
+    `Done! Follow-up with *${escapeSlackMrkdwn(investor.name)}* is set for *${formatDateReadable(parsedDate)}*${timeStr}.` +
+    ` Monday.com has been updated.${hasTime ? ' :alarm_clock: I\'ll remind you when it\'s time.' : ''}` +
+    ` :point_right: <${investor.link}|Open in Monday>`
+  );
+}
+
+async function handleAssignFollowUp(intent, message, client, say) {
+  const searchName = intent.investorName;
+  if (!searchName) {
+    await say("I need to know which investor to assign. Could you include their name?");
+    return;
+  }
+
+  const { investor, error } = await resolveInvestor(searchName);
+  if (error) { await say(error); return; }
+
+  // Parse date
+  const dateExpression = intent.date || 'tomorrow';
+  const parsedDate = parseNaturalDate(dateExpression);
+  if (!parsedDate) {
+    await say(`I couldn't figure out when you mean by "${escapeSlackMrkdwn(dateExpression)}". Try "tomorrow", "next Tuesday", or "Friday".`);
+    return;
+  }
+
+  const dateStr = formatDateYMD(parsedDate);
+
+  // Resolve the assignee to Slack + Monday.com
+  let assigneeMapping;
+  const assigneeRaw = intent.assignee;
+
+  if (!assigneeRaw) {
+    await say("I need to know who to assign this to. Mention someone by name or tag them with @.");
+    return;
+  }
+
+  if (intent.assigneeIsSlackTag) {
+    // Extract user ID from Slack tag format <@U0A9BLW5480>
+    const tagMatch = assigneeRaw.match(/<@(U[A-Z0-9]+)>/);
+    const slackUserId = tagMatch ? tagMatch[1] : assigneeRaw.replace(/[<@>]/g, '');
+    assigneeMapping = await resolveSlackUserToMonday(client, slackUserId);
+  } else {
+    assigneeMapping = await resolveNameToMonday(client, assigneeRaw);
+  }
+
+  // Update Monday.com: set follow-up date
+  const followUpResult = await updateNextFollowUp(investor.id, dateStr);
+  if (!followUpResult) {
+    await say('Sorry, I could not update the follow-up date on Monday.com.');
+    return;
+  }
+
+  // Update Monday.com: assign person (if we found a Monday match)
+  let assignmentNote = '';
+  if (assigneeMapping.mondayPersonId) {
+    const assignResult = await updateAssignedTo(investor.id, assigneeMapping.mondayPersonId);
+    if (assignResult) {
+      assignmentNote = ` and assigned to *${escapeSlackMrkdwn(assigneeMapping.slackName)}* on Monday.com`;
+    } else {
+      assignmentNote = ` (couldn't update the Assigned To column on Monday.com — please assign manually)`;
+    }
+  } else {
+    assignmentNote = ` (I couldn't find *${escapeSlackMrkdwn(assigneeMapping.slackName)}* in Monday.com to assign them — please do it manually)`;
+  }
+
+  // Store reminder for the assignee
+  const reminderUserId = assigneeMapping.slackUserId || message.user;
+  try {
+    addReminder({
+      itemId: investor.id,
+      investorName: investor.name,
+      scheduledAt: parsedDate,
+      slackUserId: reminderUserId,
+      userEmail: assigneeMapping.slackEmail || null,
+      investorStatus: investor.status,
+      dealInterest: investor.dealInterest,
+      investorLink: investor.link,
+    });
+  } catch (reminderErr) {
+    console.error('[slack/commands] Failed to store reminder:', reminderErr.message);
+  }
+
+  // DM the assignee
+  let notificationNote = '';
+  if (assigneeMapping.slackUserId) {
+    const targetChannelId = await getChannelId(client);
+    const notifyResult = await notifyAssignment(client, {
+      slackUserId: assigneeMapping.slackUserId,
+      investorName: investor.name,
+      dateStr: formatDateReadable(parsedDate),
+      mondayLink: investor.link,
+      channelId: targetChannelId,
+      assignedBy: message.user,
+    });
+
+    if (notifyResult.dmSent) {
+      notificationNote = ` They've been notified via DM.`;
+    } else if (notifyResult.channelFallback) {
+      notificationNote = ` They've been tagged in this channel.`;
+    }
+  }
+
+  await say(
+    `Done! Follow-up with *${escapeSlackMrkdwn(investor.name)}* is set for *${formatDateReadable(parsedDate)}*${assignmentNote}.${notificationNote}` +
+    ` :point_right: <${investor.link}|Open in Monday>`
+  );
+}
+
+async function handleLogTouchpoint(intent, message, client, say) {
+  const searchName = intent.investorName;
+  if (!searchName) {
+    await say("Who did you contact? Include the investor's name and I'll log the touchpoint.");
+    return;
+  }
+
+  const { investor, error } = await resolveInvestor(searchName);
+  if (error) { await say(error); return; }
+
+  const today = new Date();
+  const todayStr = formatDateYMD(today);
+
+  // Update Last Contact Date
+  const contactResult = await updateLastContactDate(investor.id, todayStr);
+  if (!contactResult) {
+    await say('Sorry, I could not update Monday.com. Please try again or update it manually.');
+    return;
+  }
+
+  // Auto-calculate Next Follow-Up based on status cadence
+  let nextDateStr = null;
+  const tier = config.cadence[investor.status];
+  if (tier) {
+    const nextDate = new Date();
+    nextDate.setDate(nextDate.getDate() + tier.autoNextDays);
+    nextDateStr = formatDateYMD(nextDate);
+    await updateNextFollowUp(investor.id, nextDateStr);
+  }
+
+  // Remove going cold flag if present
+  if (investor.name.startsWith('\uD83D\uDD34')) {
+    await removeGoingColdFlag(investor.id, investor.name);
+  }
+
+  let confirmMsg = `Got it! Logged a touchpoint for *${escapeSlackMrkdwn(investor.name)}* — Last Contact Date set to today (${todayStr}).`;
+  if (nextDateStr) {
+    confirmMsg += `\nNext follow-up auto-set to *${nextDateStr}* based on ${investor.status} cadence.`;
+  }
+  confirmMsg += `\n:point_right: <${investor.link}|Open in Monday>`;
+
+  await say(confirmMsg);
+}
+
+async function handleCheckStatus(investorName, say) {
+  if (!investorName) {
+    await say("Which investor would you like me to check on? Include their name.");
+    return;
+  }
+
+  const { investor, error } = await resolveInvestor(investorName);
+  if (error) { await say(error); return; }
+
+  await say(messages.formatInvestorStatus(investor));
+}
+
+async function handleListOverdue(say) {
+  try {
+    const investors = await getActiveInvestors();
+    if (!investors || investors.length === 0) {
+      await say('No active investors found in Monday.com.');
+      return;
+    }
+
+    const now = new Date();
+    now.setHours(0, 0, 0, 0);
+
+    const overdue = investors.filter((inv) => {
+      if (!inv.nextFollowUp) return false;
+      const followUp = new Date(inv.nextFollowUp);
+      followUp.setHours(0, 0, 0, 0);
+      return followUp < now;
+    });
+
+    await say(messages.formatOverdueList(overdue));
+  } catch (err) {
+    console.error('[slack/commands] overdue query error:', err.message);
+    await say('Something went wrong while checking overdue investors. Please try again.');
+  }
+}
+
+async function handleListByStatus(statusFilter, say) {
+  try {
+    const investors = await getActiveInvestors();
+    if (!investors || investors.length === 0) {
+      await say('No active investors found in Monday.com.');
+      return;
+    }
+
+    // Map the filter to the actual status label (partial match)
+    const filterLower = (statusFilter || '').toLowerCase();
+    const matching = investors.filter((inv) => {
+      const status = (inv.status || '').toLowerCase();
+      return status.includes(filterLower);
+    });
+
+    if (matching.length === 0) {
+      await say(`No investors found with status matching "${escapeSlackMrkdwn(statusFilter || 'unknown')}".`);
+      return;
+    }
+
+    const lines = [];
+    lines.push(`:mag: *Investors matching "${escapeSlackMrkdwn(statusFilter)}" (${matching.length}):*`);
+    lines.push('');
+
+    for (const inv of matching) {
+      const lastContact = inv.lastContactDate
+        ? `last contacted ${Math.floor((Date.now() - inv.lastContactDate.getTime()) / 86400000)} days ago`
+        : 'never contacted';
+      lines.push(
+        `• ${escapeSlackMrkdwn(inv.name)} — ${escapeSlackMrkdwn(inv.status)} — ${lastContact} — ${escapeSlackMrkdwn(inv.dealInterest || 'N/A')} — <${inv.link}|Open in Monday>`
+      );
+    }
+
+    await say(lines.join('\n'));
+  } catch (err) {
+    console.error('[slack/commands] list by status error:', err.message);
+    await say('Something went wrong. Please try again.');
+  }
+}
+
+async function handleListNotContacted(daysSinceFilter, say) {
+  try {
+    const investors = await getActiveInvestors();
+    if (!investors || investors.length === 0) {
+      await say('No active investors found in Monday.com.');
+      return;
+    }
+
+    const days = daysSinceFilter || 14;
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - days);
+    cutoff.setHours(0, 0, 0, 0);
+
+    const notContacted = investors.filter((inv) => {
+      if (!inv.lastContactDate) return true; // never contacted
+      const lc = new Date(inv.lastContactDate);
+      lc.setHours(0, 0, 0, 0);
+      return lc < cutoff;
+    });
+
+    if (notContacted.length === 0) {
+      await say(`:white_check_mark: Great news — everyone has been contacted within the last ${days} days!`);
+      return;
+    }
+
+    const lines = [];
+    lines.push(`:warning: *Investors not contacted in ${days}+ days (${notContacted.length}):*`);
+    lines.push('');
+
+    for (const inv of notContacted) {
+      const daysSince = inv.lastContactDate
+        ? Math.floor((Date.now() - inv.lastContactDate.getTime()) / 86400000)
+        : null;
+      const daysStr = daysSince !== null ? `${daysSince} days ago` : 'never contacted';
+      lines.push(
+        `• ${escapeSlackMrkdwn(inv.name)} — ${escapeSlackMrkdwn(inv.status)} — last contacted ${daysStr} — <${inv.link}|Open in Monday>`
+      );
+    }
+
+    await say(lines.join('\n'));
+  } catch (err) {
+    console.error('[slack/commands] list not contacted error:', err.message);
+    await say('Something went wrong. Please try again.');
+  }
+}
+
+async function handleTestMonday(say) {
+  try {
+    await say(':wrench: Running Monday.com write test...');
+
+    const investors = await getActiveInvestors();
+    if (!investors || investors.length === 0) {
+      await say(':x: No active investors found — cannot run test.');
+      return;
+    }
+
+    const testInvestor = investors[0];
+    await say(`:mag: Testing write on item: *${escapeSlackMrkdwn(testInvestor.name)}* (ID: ${testInvestor.id})`);
+
+    const result = await testMondayWrite(testInvestor.id);
+
+    if (result.success) {
+      await say(`:white_check_mark: Monday.com write test PASSED! Response: \`${JSON.stringify(result.data)}\``);
+    } else {
+      await say(`:x: Monday.com write test FAILED!\nError: \`${result.error}\`\nCheck Railway logs for full details.`);
+    }
+  } catch (err) {
+    console.error('[slack/commands] test monday error:', err.message);
+    await say(`:x: Test crashed: \`${err.message}\``);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -186,8 +504,7 @@ async function findSlackUserByName(client, name) {
 
 function registerCommands(app) {
   // -------------------------------------------------------------------
-  // 0. CATCH-ALL MESSAGE LOGGER — logs every incoming message event
-  //    This MUST be registered first so we can diagnose event delivery.
+  // 0. Message logger — logs every incoming message event for diagnostics
   // -------------------------------------------------------------------
   app.message(async ({ message, client }) => {
     const text = message.text || '(no text)';
@@ -198,384 +515,8 @@ function registerCommands(app) {
   });
 
   // -------------------------------------------------------------------
-  // 1. Schedule follow-up
-  //    Supported phrasings (follow-up / followup / follow up all work):
-  //    "follow up [Name] tomorrow at 2pm"
-  //    "add [Name] for follow-up on Friday"
-  //    "can we set a follow up for [Name] tomorrow"
-  //    "set followup for [Name] next Tuesday"
-  //    "schedule a follow up for [Name] on March 15"
-  //    "remind me to follow up with [Name] tomorrow"
+  // Main message handler — regex fast-path + NLU fallback
   // -------------------------------------------------------------------
-
-  // Date tail pattern — reused across follow-up regexes.
-  // Must capture full time expressions like "today at 5pm CST" or "tomorrow at 2pm".
-  // The optional leading "for" handles "for today at 5pm" → captures "today at 5pm".
-  const dateTail =
-    '(?:for\\s+)?((?:tomorrow|today)(?:\\s+at\\s+.+)?|next\\s+.+|on\\s+.+|in\\s+.+|(?:at\\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday).*)$';
-
-  // Original: "follow up [Name] [date]"
-  const followUpPattern = new RegExp(
-    'follow[\\s-]*up\\s+(.+?)\\s+' + dateTail, 'i'
-  );
-
-  // "add [Name] for follow-up on [date]"
-  const addFollowUpPattern =
-    /add\s+(.+?)\s+for\s+follow[\s-]*up\s+(?:on\s+)?(.+)$/i;
-
-  // "can we/you set a follow up for/with [Name] [date]"
-  // "set a followup for/with [Name] [date]"
-  // "set followup for [Name] [date]"
-  const setFollowUpPattern = new RegExp(
-    '(?:can\\s+(?:we|you)\\s+)?set\\s+(?:a\\s+)?follow[\\s-]*up\\s+(?:for|with)\\s+(.+?)\\s+' + dateTail, 'i'
-  );
-
-  // "schedule a follow up for/with [Name] [date]"
-  const scheduleFollowUpPattern = new RegExp(
-    'schedule\\s+(?:a\\s+)?follow[\\s-]*up\\s+(?:for|with)\\s+(.+?)\\s+' + dateTail, 'i'
-  );
-
-  // "remind me to follow up with/on/for [Name] [date]"
-  const remindFollowUpPattern = new RegExp(
-    'remind\\s+me\\s+to\\s+follow[\\s-]*up\\s+(?:with|on|for)\\s+(.+?)\\s+' + dateTail, 'i'
-  );
-
-  // All follow-up patterns share the same handler
-  const followUpPatterns = [
-    followUpPattern,
-    addFollowUpPattern,
-    setFollowUpPattern,
-    scheduleFollowUpPattern,
-    remindFollowUpPattern,
-  ];
-
-  for (const pattern of followUpPatterns) {
-    app.message(pattern, async ({ message, context, client, say }) => {
-      if (!shouldProcess(message)) return;
-      if (!(await isCorrectChannel(message, client))) return;
-
-      const matches = message.text.match(pattern);
-      if (!matches) return;
-
-      const searchName = stripNamePrefix(matches[1].trim());
-      const dateExpression = stripTrailingPunctuation(matches[2].trim());
-
-      await handleScheduleFollowUp(searchName, dateExpression, message, client, say);
-    });
-  }
-
-  async function handleScheduleFollowUp(searchName, dateExpression, message, client, say) {
-    try {
-      // Resolve investor
-      const { investor, error } = await resolveInvestor(searchName);
-      if (error) {
-        await say(error);
-        return;
-      }
-
-      // Parse date
-      const parsedDate = parseNaturalDate(dateExpression);
-      if (!parsedDate) {
-        await say(`I couldn't understand the date "${escapeSlackMrkdwn(dateExpression)}". Try something like "tomorrow", "next Tuesday", or "on March 15".`);
-        return;
-      }
-
-      const dateStr = formatDateYMD(parsedDate);
-
-      // Update Monday.com
-      const result = await updateNextFollowUp(investor.id, dateStr);
-      if (!result) {
-        await say('Sorry, I could not update Monday.com. Please try again or update it manually.');
-        return;
-      }
-
-      // Store reminder with investor context for the notification
-      try {
-        const userInfo = await client.users.info({ user: message.user });
-        const email = userInfo.user.profile.email || null;
-
-        addReminder({
-          itemId: investor.id,
-          investorName: investor.name,
-          scheduledAt: parsedDate,
-          slackUserId: message.user,
-          userEmail: email,
-          investorStatus: investor.status,
-          dealInterest: investor.dealInterest,
-          investorLink: investor.link,
-        });
-      } catch (reminderErr) {
-        console.error('[slack/commands] Failed to store reminder:', reminderErr.message);
-        // Non-fatal: still confirm the follow-up was set
-      }
-
-      // Include time in confirmation if the user specified one
-      const hasTime = dateExpression.match(/\d{1,2}\s*(?:am|pm|:\d{2})/i);
-      let timeStr = '';
-      if (hasTime) {
-        timeStr = ` at ${parsedDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: config.timezone, timeZoneName: 'short' })}`;
-      }
-
-      await say(
-        `:white_check_mark: Got it! Follow-up with *${escapeSlackMrkdwn(investor.name)}* scheduled for *${formatDateReadable(parsedDate)}*${timeStr} (${dateStr}).\nMonday.com has been updated.${hasTime ? ' :alarm_clock: I\'ll remind you at that time.' : ''} <${investor.link}|Open in Monday>`
-      );
-    } catch (err) {
-      console.error('[slack/commands] handleScheduleFollowUp error:', err.message);
-      await say('Something went wrong while scheduling the follow-up. Please try again.');
-    }
-  }
-
-  // -------------------------------------------------------------------
-  // 2. Team member follow-up
-  //    "Sarah follow up John Smith tomorrow"
-  //    "Sarah followup John Smith tomorrow"
-  // -------------------------------------------------------------------
-  const teamFollowUpPattern =
-    /^(\w+)\s+follow[\s-]*up\s+(.+?)\s+(tomorrow|today|next\s+\w+|on\s+.+?|in\s+.+?)$/i;
-
-  app.message(teamFollowUpPattern, async ({ message, context, client, say }) => {
-    if (!shouldProcess(message)) return;
-    if (!(await isCorrectChannel(message, client))) return;
-
-    const matches = message.text.match(teamFollowUpPattern);
-    if (!matches) return;
-
-    const teamMemberName = matches[1].trim();
-    const searchName = stripNamePrefix(matches[2].trim());
-    const dateExpression = stripTrailingPunctuation(matches[3].trim());
-
-    try {
-      // Find the team member in Slack
-      const teamMember = await findSlackUserByName(client, teamMemberName);
-      if (!teamMember) {
-        await say(`I couldn't find a team member named "${escapeSlackMrkdwn(teamMemberName)}" in Slack. Please check the name and try again.`);
-        return;
-      }
-
-      // Resolve investor
-      const { investor, error } = await resolveInvestor(searchName);
-      if (error) {
-        await say(error);
-        return;
-      }
-
-      // Parse date
-      const parsedDate = parseNaturalDate(dateExpression);
-      if (!parsedDate) {
-        await say(`I couldn't understand the date "${escapeSlackMrkdwn(dateExpression)}". Try something like "tomorrow", "next Tuesday", or "on March 15".`);
-        return;
-      }
-
-      const dateStr = formatDateYMD(parsedDate);
-
-      // Update Monday.com
-      const result = await updateNextFollowUp(investor.id, dateStr);
-      if (!result) {
-        await say('Sorry, I could not update Monday.com. Please try again or update it manually.');
-        return;
-      }
-
-      // Store reminder for the team member with investor context
-      const email = teamMember.profile.email || null;
-      addReminder({
-        itemId: investor.id,
-        investorName: investor.name,
-        scheduledAt: parsedDate,
-        slackUserId: teamMember.id,
-        userEmail: email,
-        investorStatus: investor.status,
-        dealInterest: investor.dealInterest,
-        investorLink: investor.link,
-      });
-
-      await say(
-        `:white_check_mark: Follow-up with *${escapeSlackMrkdwn(investor.name)}* assigned to <@${teamMember.id}> for *${formatDateReadable(parsedDate)}* (${dateStr}).\nMonday.com has been updated. <${investor.link}|Open in Monday>`
-      );
-    } catch (err) {
-      console.error('[slack/commands] team follow-up error:', err.message);
-      await say('Something went wrong while scheduling the team follow-up. Please try again.');
-    }
-  });
-
-  // -------------------------------------------------------------------
-  // 3. Log touchpoint
-  //    "contacted John Smith today"
-  //    "spoke with Jane Doe"
-  //    "reached out to Mike Johnson"
-  // -------------------------------------------------------------------
-  const touchpointPattern =
-    /(?:contacted|spoke\s+with|reached\s+out\s+to)\s+(.+?)(?:\s+today)?$/i;
-
-  app.message(touchpointPattern, async ({ message, context, client, say }) => {
-    if (!shouldProcess(message)) return;
-    if (!(await isCorrectChannel(message, client))) return;
-
-    const matches = message.text.match(touchpointPattern);
-    if (!matches) return;
-
-    const searchName = matches[1].trim();
-
-    try {
-      // Resolve investor
-      const { investor, error } = await resolveInvestor(searchName);
-      if (error) {
-        await say(error);
-        return;
-      }
-
-      const today = new Date();
-      const todayStr = formatDateYMD(today);
-
-      // Update Last Contact Date
-      const contactResult = await updateLastContactDate(investor.id, todayStr);
-      if (!contactResult) {
-        await say('Sorry, I could not update Monday.com. Please try again or update it manually.');
-        return;
-      }
-
-      // Auto-calculate Next Follow-Up based on status cadence
-      let nextDateStr = null;
-      const tier = config.cadence[investor.status];
-      if (tier) {
-        const nextDate = new Date();
-        nextDate.setDate(nextDate.getDate() + tier.autoNextDays);
-        nextDateStr = formatDateYMD(nextDate);
-        await updateNextFollowUp(investor.id, nextDateStr);
-      }
-
-      // Remove going cold flag if present
-      if (investor.name.startsWith('\uD83D\uDD34')) {
-        await removeGoingColdFlag(investor.id, investor.name);
-      }
-
-      let confirmMsg =
-        `:white_check_mark: Logged touchpoint for *${escapeSlackMrkdwn(investor.name)}* \u2014 Last Contact Date set to today (${todayStr}).`;
-      if (nextDateStr) {
-        confirmMsg += `\nNext follow-up auto-set to *${nextDateStr}* based on ${investor.status} cadence.`;
-      }
-      confirmMsg += `\n<${investor.link}|Open in Monday>`;
-
-      await say(confirmMsg);
-    } catch (err) {
-      console.error('[slack/commands] touchpoint logging error:', err.message);
-      await say('Something went wrong while logging the touchpoint. Please try again.');
-    }
-  });
-
-  // -------------------------------------------------------------------
-  // 4. Who's overdue
-  //    "who's overdue" / "overdue investors"
-  // -------------------------------------------------------------------
-  const overduePattern = /(?:who'?s?\s+overdue|overdue\s+investors)/i;
-
-  app.message(overduePattern, async ({ message, context, client, say }) => {
-    if (!shouldProcess(message)) return;
-    if (!(await isCorrectChannel(message, client))) return;
-
-    try {
-      const investors = await getActiveInvestors();
-      if (!investors || investors.length === 0) {
-        await say('No active investors found in Monday.com.');
-        return;
-      }
-
-      const now = new Date();
-      now.setHours(0, 0, 0, 0);
-
-      const overdue = investors.filter((inv) => {
-        if (!inv.nextFollowUp) return false;
-        const followUp = new Date(inv.nextFollowUp);
-        followUp.setHours(0, 0, 0, 0);
-        return followUp < now;
-      });
-
-      await say(messages.formatOverdueList(overdue));
-    } catch (err) {
-      console.error('[slack/commands] overdue query error:', err.message);
-      await say('Something went wrong while checking overdue investors. Please try again.');
-    }
-  });
-
-  // -------------------------------------------------------------------
-  // 5. Investor status check
-  //    "status on John Smith" / "check on Jane Doe"
-  // -------------------------------------------------------------------
-  const statusPattern = /(?:status\s+on|check\s+on)\s+(.+)/i;
-
-  app.message(statusPattern, async ({ message, context, client, say }) => {
-    if (!shouldProcess(message)) return;
-    if (!(await isCorrectChannel(message, client))) return;
-
-    const matches = message.text.match(statusPattern);
-    if (!matches) return;
-
-    const searchName = matches[1].trim();
-
-    try {
-      const { investor, error } = await resolveInvestor(searchName);
-      if (error) {
-        await say(error);
-        return;
-      }
-
-      await say(messages.formatInvestorStatus(investor));
-    } catch (err) {
-      console.error('[slack/commands] status check error:', err.message);
-      await say('Something went wrong while looking up the investor. Please try again.');
-    }
-  });
-
-  // -------------------------------------------------------------------
-  // 6. Test Monday.com write access (diagnostic)
-  //    "test monday" — picks the first active investor and attempts a write
-  // -------------------------------------------------------------------
-  const testMondayPattern = /^test\s+monday$/i;
-
-  app.message(testMondayPattern, async ({ message, context, client, say }) => {
-    if (!shouldProcess(message)) return;
-    if (!(await isCorrectChannel(message, client))) return;
-
-    try {
-      await say(':wrench: Running Monday.com write test...');
-
-      // Get first active investor to use as test target
-      const investors = await getActiveInvestors();
-      if (!investors || investors.length === 0) {
-        await say(':x: No active investors found — cannot run test.');
-        return;
-      }
-
-      const testInvestor = investors[0];
-      await say(`:mag: Testing write on item: *${escapeSlackMrkdwn(testInvestor.name)}* (ID: ${testInvestor.id})`);
-
-      const result = await testMondayWrite(testInvestor.id);
-
-      if (result.success) {
-        await say(`:white_check_mark: Monday.com write test PASSED! Response: \`${JSON.stringify(result.data)}\``);
-      } else {
-        await say(`:x: Monday.com write test FAILED!\nError: \`${result.error}\`\nCheck Railway logs for full details.`);
-      }
-    } catch (err) {
-      console.error('[slack/commands] test monday error:', err.message);
-      await say(`:x: Test crashed: \`${err.message}\``);
-    }
-  });
-
-  // -------------------------------------------------------------------
-  // 7. CATCH-ALL — reply with help when no command matched
-  //    Registered LAST so every other listener runs first.
-  // -------------------------------------------------------------------
-
-  // Collect all known patterns into one array for the catch-all check
-  const allKnownPatterns = [
-    ...followUpPatterns,
-    teamFollowUpPattern,
-    touchpointPattern,
-    overduePattern,
-    statusPattern,
-    testMondayPattern,
-  ];
-
   app.message(async ({ message, client, say }) => {
     if (!shouldProcess(message)) return;
     if (!(await isCorrectChannel(message, client))) return;
@@ -583,19 +524,95 @@ function registerCommands(app) {
     const text = (message.text || '').trim();
     if (!text) return;
 
-    // If any known pattern matches, another handler already dealt with it
-    const matched = allKnownPatterns.some((p) => p.test(text));
-    if (matched) return;
+    // Ignore messages from the bot itself
+    if (message.user === config.slack.botUserId) return;
 
-    await say(
-      `:question: I didn't understand that. Here's what I can do:\n` +
-      `\u2022 *Schedule follow-up:* "follow up [Name] tomorrow" or "set a followup for [Name] next Tuesday"\n` +
-      `\u2022 *Log touchpoint:* "contacted [Name] today" or "spoke with [Name]"\n` +
-      `\u2022 *Check overdue:* "who's overdue"\n` +
-      `\u2022 *Investor status:* "status on [Name]" or "check on [Name]"\n` +
-      `\u2022 *Assign follow-up:* "[Team member] follow up [Name] tomorrow"\n` +
-      `\u2022 *Test connection:* "test monday"`
-    );
+    try {
+      // ── FAST PATH: regex matching for common commands ──
+
+      // Test Monday (exact match)
+      if (REGEX_PATTERNS.testMonday.test(text)) {
+        await handleTestMonday(say);
+        return;
+      }
+
+      // Who's overdue
+      if (REGEX_PATTERNS.overdue.test(text)) {
+        await handleListOverdue(say);
+        return;
+      }
+
+      // Status check: "status on X" / "check on X"
+      const statusMatch = text.match(REGEX_PATTERNS.statusCheck);
+      if (statusMatch) {
+        await handleCheckStatus(statusMatch[1].trim(), say);
+        return;
+      }
+
+      // Touchpoint: "contacted X today" / "spoke with X"
+      const touchpointMatch = text.match(REGEX_PATTERNS.touchpoint);
+      if (touchpointMatch) {
+        const name = touchpointMatch[1].trim();
+        await handleLogTouchpoint({ investorName: name }, message, client, say);
+        return;
+      }
+
+      // ── NLU PATH: send to Claude for intent parsing ──
+      console.log(`[slack/commands] No regex match for "${text}" — sending to NLU`);
+
+      const intent = await parseIntent(text);
+
+      // If confidence is too low, treat as non-command
+      if (intent.confidence < 0.5 || intent.action === 'unknown') {
+        await say(
+          "I'm not sure what you need — are you trying to schedule a follow-up, log a contact, or check on an investor? Just let me know and I'll help out."
+        );
+        return;
+      }
+
+      // Route based on parsed action
+      switch (intent.action) {
+        case 'schedule_followup':
+          await handleScheduleFollowUp(intent, message, client, say);
+          break;
+
+        case 'assign_followup':
+          await handleAssignFollowUp(intent, message, client, say);
+          break;
+
+        case 'log_touchpoint':
+          await handleLogTouchpoint(intent, message, client, say);
+          break;
+
+        case 'check_status':
+          await handleCheckStatus(intent.investorName, say);
+          break;
+
+        case 'list_overdue':
+          await handleListOverdue(say);
+          break;
+
+        case 'list_by_status':
+          await handleListByStatus(intent.statusFilter, say);
+          break;
+
+        case 'list_not_contacted':
+          await handleListNotContacted(intent.daysSinceFilter, say);
+          break;
+
+        case 'test_monday':
+          await handleTestMonday(say);
+          break;
+
+        default:
+          await say(
+            "I'm not sure what you need — are you trying to schedule a follow-up, log a contact, or check on an investor? Just let me know and I'll help out."
+          );
+      }
+    } catch (err) {
+      console.error('[slack/commands] Handler error:', err.message, err.stack);
+      await say('Something went wrong processing your message. Please try again.');
+    }
   });
 }
 

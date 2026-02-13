@@ -47,14 +47,37 @@ function formatCurrency(amount) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Format the assignee tag for an investor in digest messages.
+ * Uses slackUserMap (mondayPersonId → slackUserId) if provided.
+ *
+ * @param {Object} investor - Investor object with assignedTo array
+ * @param {Map}    [slackUserMap] - Map of Monday.com person ID → Slack user ID
+ * @returns {string} Formatted assignee string or empty
+ */
+function formatAssigneeTag(investor, slackUserMap) {
+  if (!investor.assignedTo || investor.assignedTo.length === 0) return '';
+
+  const tags = investor.assignedTo.map((person) => {
+    const personId = String(person.id);
+    if (slackUserMap && slackUserMap.has(personId)) {
+      return `<@${slackUserMap.get(personId)}>`;
+    }
+    return person.name || `ID:${personId}`;
+  });
+
+  return tags.length > 0 ? ` → ${tags.join(', ')}` : '';
+}
+
+/**
  * Build the daily follow-up report message.
  *
  * @param {Array}  overdue     - Investors whose next follow-up is past due
  * @param {Array}  dueToday    - Investors whose next follow-up is today
  * @param {Object} suggestions - Map of investor name -> AI suggestion text
+ * @param {Map}    [slackUserMap] - Map of Monday.com person ID → Slack user ID (for tagging)
  * @returns {string} Slack mrkdwn message
  */
-function formatDailyDigest(overdue, dueToday, suggestions = {}) {
+function formatDailyDigest(overdue, dueToday, suggestions = {}, slackUserMap = null) {
   if ((!overdue || overdue.length === 0) && (!dueToday || dueToday.length === 0)) {
     return ':white_check_mark: All clear \u2014 no follow-ups due today!';
   }
@@ -69,8 +92,9 @@ function formatDailyDigest(overdue, dueToday, suggestions = {}) {
     for (const inv of overdue) {
       const days = daysAgo(inv.lastContactDate);
       const daysStr = days !== null ? `last contacted ${days} days ago` : 'no contact date';
+      const assignee = formatAssigneeTag(inv, slackUserMap);
       lines.push(
-        `\u2022 :red_circle: ${escapeSlackMrkdwn(inv.name)} \u2014 ${escapeSlackMrkdwn(inv.status)} \u2014 ${daysStr} \u2014 ${escapeSlackMrkdwn(inv.dealInterest || 'N/A')} \u2014 <${inv.link}|Open in Monday>`
+        `\u2022 :red_circle: ${escapeSlackMrkdwn(inv.name)}${assignee} \u2014 ${escapeSlackMrkdwn(inv.status)} \u2014 ${daysStr} \u2014 ${escapeSlackMrkdwn(inv.dealInterest || 'N/A')} \u2014 <${inv.link}|Open in Monday>`
       );
     }
     lines.push('');
@@ -80,8 +104,9 @@ function formatDailyDigest(overdue, dueToday, suggestions = {}) {
   if (dueToday && dueToday.length > 0) {
     lines.push(`:calendar: *DUE TODAY (${dueToday.length}):*`);
     for (const inv of dueToday) {
+      const assignee = formatAssigneeTag(inv, slackUserMap);
       lines.push(
-        `\u2022 ${escapeSlackMrkdwn(inv.name)} \u2014 ${escapeSlackMrkdwn(inv.status)} \u2014 ${escapeSlackMrkdwn(inv.dealInterest || 'N/A')} \u2014 <${inv.link}|Open in Monday>`
+        `\u2022 ${escapeSlackMrkdwn(inv.name)}${assignee} \u2014 ${escapeSlackMrkdwn(inv.status)} \u2014 ${escapeSlackMrkdwn(inv.dealInterest || 'N/A')} \u2014 <${inv.link}|Open in Monday>`
       );
     }
     lines.push('');
@@ -90,7 +115,6 @@ function formatDailyDigest(overdue, dueToday, suggestions = {}) {
   // AI suggestions section
   if (suggestions && Object.keys(suggestions).length > 0) {
     for (const [name, suggestion] of Object.entries(suggestions)) {
-      // Find the matching investor for extra context
       const inv = [...(overdue || []), ...(dueToday || [])].find(
         (i) => i.name === name
       );

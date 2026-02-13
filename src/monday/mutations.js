@@ -240,6 +240,43 @@ async function testMondayWrite(testItemId) {
   }
 }
 
+/**
+ * Update the "Assigned To" people column on an investor item.
+ *
+ * @param {string|number} itemId        - The Monday item ID
+ * @param {string}        mondayPersonId - The Monday.com user/person ID to assign
+ * @returns {Promise<object|null>} Mutation result or null on failure
+ */
+async function updateAssignedTo(itemId, mondayPersonId) {
+  try {
+    // People column format: {"personsAndTeams":[{"id":PERSON_ID,"kind":"person"}]}
+    const columnValues = JSON.stringify({
+      [config.monday.columns.assignedTo]: {
+        personsAndTeams: [{ id: Number(mondayPersonId), kind: 'person' }],
+      },
+    });
+    console.log(`[monday/mutations] updateAssignedTo: item=${itemId} person=${mondayPersonId}`);
+
+    const data = await mondayApi(CHANGE_MULTIPLE_VALUES, {
+      boardId: BOARD_ID,
+      itemId: String(itemId),
+      columnValues,
+    });
+    console.log(`[monday/mutations] updateAssignedTo succeeded for item ${itemId}`);
+    return data;
+  } catch (err) {
+    console.error(`[monday/mutations] updateAssignedTo FAILED for item ${itemId}:`, err.message);
+    console.error(`[monday/mutations] Error details:`, JSON.stringify({
+      graphqlErrors: err.graphqlErrors,
+      errorCode: err.errorCode,
+      statusCode: err.statusCode,
+      responseBody: err.responseBody,
+      stack: err.stack,
+    }, null, 2));
+    return null;
+  }
+}
+
 module.exports = {
   updateColumnValue,
   updateNextFollowUp,
@@ -248,4 +285,5 @@ module.exports = {
   addGoingColdFlag,
   removeGoingColdFlag,
   testMondayWrite,
+  updateAssignedTo,
 };

@@ -3,6 +3,7 @@ const { getActiveInvestors } = require('../monday/queries');
 const { getRecentCommunications, getActiveOfferings } = require('../monday/queries');
 const { generateFollowUpSuggestion } = require('../ai/suggestions');
 const { formatDailyDigest } = require('../slack/messages');
+const { getMondayUsers } = require('../utils/userMapping');
 
 function isSameDay(d1, d2) {
   return (
@@ -18,6 +19,49 @@ function isBeforeDay(d1, d2) {
   const b = new Date(d2);
   b.setHours(0, 0, 0, 0);
   return a < b;
+}
+
+/**
+ * Build a map of Monday.com person ID → Slack user ID by matching emails.
+ * Used to tag assigned users in the daily digest with <@USERID>.
+ */
+async function buildSlackUserMap(slackClient) {
+  const slackUserMap = new Map();
+
+  try {
+    // Get all Monday.com users
+    const mondayUsers = await getMondayUsers();
+
+    // Get all Slack users
+    let cursor;
+    const slackUsers = [];
+    do {
+      const result = await slackClient.users.list({ limit: 200, cursor });
+      for (const user of result.members) {
+        if (user.deleted || user.is_bot) continue;
+        slackUsers.push(user);
+      }
+      cursor = result.response_metadata && result.response_metadata.next_cursor;
+    } while (cursor);
+
+    // Match by email
+    for (const mondayUser of mondayUsers) {
+      if (!mondayUser.email) continue;
+      const emailLower = mondayUser.email.toLowerCase();
+      const slackMatch = slackUsers.find(
+        (u) => u.profile && u.profile.email && u.profile.email.toLowerCase() === emailLower
+      );
+      if (slackMatch) {
+        slackUserMap.set(String(mondayUser.id), slackMatch.id);
+      }
+    }
+
+    console.log(`[Daily Scan] Built Slack user map: ${slackUserMap.size} Monday→Slack mappings`);
+  } catch (err) {
+    console.error('[Daily Scan] Failed to build Slack user map:', err.message);
+  }
+
+  return slackUserMap;
 }
 
 async function runDailyScan(slackClient, channelId) {
@@ -73,8 +117,11 @@ async function runDailyScan(slackClient, channelId) {
     }
   }
 
+  // Build Slack user map for tagging assigned people in the digest
+  const slackUserMap = await buildSlackUserMap(slackClient);
+
   // Format and post digest to Slack
-  const message = formatDailyDigest(overdueList, dueTodayList, suggestions);
+  const message = formatDailyDigest(overdueList, dueTodayList, suggestions, slackUserMap);
 
   await slackClient.chat.postMessage({
     channel: channelId,
