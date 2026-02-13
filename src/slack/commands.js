@@ -2,28 +2,47 @@
 // Slack command handlers — NLU-powered with regex fallback
 // ---------------------------------------------------------------------------
 // Messages flow through this pipeline:
-//   1. Fast regex matching for well-known commands (zero latency)
-//   2. If no regex match → Anthropic NLU intent parsing (conversational)
-//   3. Route parsed intent to the appropriate handler
+//   1. Message deduplication (skip already-processed messages)
+//   2. Strip markdown and Slack formatting for clean parsing
+//   3. Fast regex matching for well-known commands (zero latency)
+//   4. If no regex match → Anthropic NLU intent parsing (conversational)
+//   5. Route parsed intent to the appropriate handler
+//   6. If missing_info, ask a targeted follow-up question
 // ---------------------------------------------------------------------------
 
 const config = require('../config');
-const { getActiveInvestors } = require('../monday/queries');
+const { getActiveInvestors, getAllInvestors } = require('../monday/queries');
 const {
   updateNextFollowUp,
   updateLastContactDate,
   removeGoingColdFlag,
   testMondayWrite,
   updateAssignedTo,
+  createInvestor,
 } = require('../monday/mutations');
 const { findBestMatch } = require('../utils/nameMatch');
 const { escapeSlackMrkdwn } = require('../utils/helpers');
 const { parseNaturalDate } = require('../utils/dateParser');
 const { addReminder } = require('../reminders/store');
 const { parseIntent } = require('../ai/intentParser');
-const { resolveSlackUserToMonday, resolveNameToMonday } = require('../utils/userMapping');
+const { parseContacts } = require('../ai/contactParser');
+const { resolveSlackUserToMonday, resolveNameToMonday, getTeamSlackId } = require('../utils/userMapping');
 const { notifyAssignment } = require('./notifications');
 const messages = require('./messages');
+
+// ---------------------------------------------------------------------------
+// Message deduplication cache — prevents double-processing
+// ---------------------------------------------------------------------------
+
+const processedMessages = new Map();
+
+// Clean up old entries every 5 minutes
+setInterval(() => {
+  const fiveMinutesAgo = Date.now() - 300000;
+  for (const [ts, time] of processedMessages) {
+    if (time < fiveMinutesAgo) processedMessages.delete(ts);
+  }
+}, 300000);
 
 // ---------------------------------------------------------------------------
 // Channel ID — use hardcoded ID from config, fall back to API lookup
@@ -88,6 +107,36 @@ function formatDateReadable(date) {
  */
 function stripNamePrefix(name) {
   return name.replace(/^(?:with|for|to|on|about|regarding)\s+/i, '').trim();
+}
+
+/**
+ * Strip Slack markdown formatting and special characters from message text
+ * before processing. Handles backticks, bold, italic, and Slack's special
+ * formatting for phone numbers, emails, and URLs.
+ */
+function cleanSlackText(text) {
+  let cleaned = text;
+
+  // Strip code blocks and inline code
+  cleaned = cleaned.replace(/```[\s\S]*?```/g, '');
+  cleaned = cleaned.replace(/`([^`]+)`/g, '$1');
+
+  // Strip bold/italic markers
+  cleaned = cleaned.replace(/\*([^*]+)\*/g, '$1');
+  cleaned = cleaned.replace(/_([^_]+)_/g, '$1');
+  cleaned = cleaned.replace(/~([^~]+)~/g, '$1'); // strikethrough
+
+  // Decode Slack phone formatting: <tel:555-123-4567|555-123-4567> → 555-123-4567
+  cleaned = cleaned.replace(/<tel:([^|>]+)\|?[^>]*>/g, '$1');
+
+  // Decode Slack email formatting: <mailto:user@test.com|user@test.com> → user@test.com
+  cleaned = cleaned.replace(/<mailto:([^|>]+)\|?[^>]*>/g, '$1');
+
+  // Decode Slack URL formatting: <https://url.com|Display Text> → https://url.com
+  // But preserve user mentions <@UXXXX> and channel mentions <#CXXXX>
+  cleaned = cleaned.replace(/<(https?:\/\/[^|>]+)\|?[^>]*>/g, '$1');
+
+  return cleaned.trim();
 }
 
 function shouldProcess(message) {
@@ -180,7 +229,7 @@ async function handleScheduleFollowUp(intent, message, client, say) {
   // Update Monday.com
   const result = await updateNextFollowUp(investor.id, dateStr);
   if (!result) {
-    await say('Sorry, I could not update Monday.com. Please try again or update it manually.');
+    await say(`Sorry, I could not update Monday.com for ${escapeSlackMrkdwn(investor.name)}. Please try again or update it manually. :point_right: <${investor.link}|Open in Monday>`);
     return;
   }
 
@@ -212,8 +261,9 @@ async function handleScheduleFollowUp(intent, message, client, say) {
 
   await say(
     `Done! Follow-up with *${escapeSlackMrkdwn(investor.name)}* is set for *${formatDateReadable(parsedDate)}*${timeStr}.` +
-    ` Monday.com has been updated.${hasTime ? ' :alarm_clock: I\'ll remind you when it\'s time.' : ''}` +
-    ` :point_right: <${investor.link}|Open in Monday>`
+    ` Monday.com is updated.${hasTime ? ' :alarm_clock: I\'ll remind you when it\'s time.' : ''}` +
+    ` :point_right: <${investor.link}|Open in Monday>` +
+    ` Want me to assign this to someone specific?`
   );
 }
 
@@ -252,13 +302,14 @@ async function handleAssignFollowUp(intent, message, client, say) {
     const slackUserId = tagMatch ? tagMatch[1] : assigneeRaw.replace(/[<@>]/g, '');
     assigneeMapping = await resolveSlackUserToMonday(client, slackUserId);
   } else {
+    // Try hardcoded team lookup first, then fall back to API
     assigneeMapping = await resolveNameToMonday(client, assigneeRaw);
   }
 
   // Update Monday.com: set follow-up date
   const followUpResult = await updateNextFollowUp(investor.id, dateStr);
   if (!followUpResult) {
-    await say('Sorry, I could not update the follow-up date on Monday.com.');
+    await say(`Sorry, I could not update the follow-up date on Monday.com for ${escapeSlackMrkdwn(investor.name)}. :point_right: <${investor.link}|Open in Monday>`);
     return;
   }
 
@@ -334,7 +385,7 @@ async function handleLogTouchpoint(intent, message, client, say) {
   // Update Last Contact Date
   const contactResult = await updateLastContactDate(investor.id, todayStr);
   if (!contactResult) {
-    await say('Sorry, I could not update Monday.com. Please try again or update it manually.');
+    await say(`Sorry, I could not update Monday.com for ${escapeSlackMrkdwn(investor.name)}. Please try again or update it manually. :point_right: <${investor.link}|Open in Monday>`);
     return;
   }
 
@@ -353,11 +404,12 @@ async function handleLogTouchpoint(intent, message, client, say) {
     await removeGoingColdFlag(investor.id, investor.name);
   }
 
-  let confirmMsg = `Got it! Logged a touchpoint for *${escapeSlackMrkdwn(investor.name)}* — Last Contact Date set to today (${todayStr}).`;
-  if (nextDateStr) {
-    confirmMsg += `\nNext follow-up auto-set to *${nextDateStr}* based on ${investor.status} cadence.`;
+  let confirmMsg = `Logged it — *${escapeSlackMrkdwn(investor.name)}* marked as contacted today.`;
+  if (nextDateStr && tier) {
+    confirmMsg += ` Next follow-up is auto-set for *${nextDateStr}* based on ${escapeSlackMrkdwn(investor.status)} cadence (${tier.autoNextDays} days).`;
   }
-  confirmMsg += `\n:point_right: <${investor.link}|Open in Monday>`;
+  confirmMsg += ` Status: ${escapeSlackMrkdwn(investor.status)} | Deal: ${escapeSlackMrkdwn(investor.dealInterest || 'N/A')}.`;
+  confirmMsg += ` :point_right: <${investor.link}|Open in Monday>`;
 
   await say(confirmMsg);
 }
@@ -512,6 +564,182 @@ async function handleTestMonday(say) {
 }
 
 // ---------------------------------------------------------------------------
+// NEW: Add Investor handler — parses pasted contacts and creates items
+// ---------------------------------------------------------------------------
+
+async function handleAddInvestor(rawText, say) {
+  try {
+    // Parse contacts from the raw message using AI
+    const contacts = await parseContacts(rawText);
+
+    if (!contacts || contacts.length === 0) {
+      await say("I couldn't parse any contact information from your message. Try including a name and at least a phone number or email.");
+      return;
+    }
+
+    // Get existing investors for duplicate checking
+    const existingInvestors = await getAllInvestors();
+    const results = [];
+
+    for (const contact of contacts) {
+      // Check for duplicates using fuzzy name matching
+      const duplicate = existingInvestors.length > 0
+        ? findBestMatch(contact.name, existingInvestors)
+        : null;
+
+      if (duplicate && duplicate.score <= 0.3) {
+        // Close match — likely already exists
+        results.push({
+          name: contact.name,
+          status: 'duplicate',
+          existingName: duplicate.match.name,
+          link: duplicate.match.link,
+        });
+        continue;
+      }
+
+      // Calculate default follow-up date (14 days from now)
+      const followUpDate = new Date();
+      followUpDate.setDate(followUpDate.getDate() + 14);
+      const followUpStr = formatDateYMD(followUpDate);
+
+      // Create the investor on Monday.com
+      const created = await createInvestor({
+        name: contact.name,
+        phone: contact.phone,
+        email: contact.email,
+        linkedin: contact.linkedin,
+        notes: contact.notes,
+        nextFollowUp: followUpStr,
+      });
+
+      if (created) {
+        results.push({
+          name: created.name,
+          status: 'created',
+          phone: contact.phone,
+          email: contact.email,
+          link: created.link,
+          followUp: followUpStr,
+        });
+      } else {
+        results.push({
+          name: contact.name,
+          status: 'failed',
+        });
+      }
+    }
+
+    // Format response
+    const lines = [];
+    for (const r of results) {
+      if (r.status === 'created') {
+        const details = [];
+        if (r.phone) details.push(`Phone: ${r.phone}`);
+        if (r.email) details.push(`Email: ${r.email}`);
+        lines.push(
+          `:white_check_mark: Added *${escapeSlackMrkdwn(r.name)}* to the investor board as a new lead. ${details.join(', ')}. Next follow-up set for ${r.followUp}. <${r.link}|Open in Monday>`
+        );
+      } else if (r.status === 'duplicate') {
+        lines.push(
+          `:information_source: *${escapeSlackMrkdwn(r.existingName)}* is already on the board. Did you want me to update their info or log a touchpoint? <${r.link}|Open in Monday>`
+        );
+      } else {
+        lines.push(
+          `:x: Failed to add *${escapeSlackMrkdwn(r.name)}* — Monday.com update error. Please add them manually.`
+        );
+      }
+    }
+
+    await say(lines.join('\n\n'));
+  } catch (err) {
+    console.error('[slack/commands] add investor error:', err.message);
+    await say('Something went wrong while adding the investor. Please try again.');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// NEW: Contact Info handler — look up phone/email for an investor
+// ---------------------------------------------------------------------------
+
+async function handleContactInfo(investorName, contactField, say) {
+  if (!investorName) {
+    await say("Which investor's contact info do you need? Include their name.");
+    return;
+  }
+
+  const { investor, error } = await resolveInvestor(investorName);
+  if (error) { await say(error); return; }
+
+  if (contactField === 'phone') {
+    const phone = investor.phone || 'Not on file';
+    await say(`*${escapeSlackMrkdwn(investor.name)}*'s phone: ${phone}`);
+  } else if (contactField === 'email') {
+    const email = investor.email || 'Not on file';
+    await say(`*${escapeSlackMrkdwn(investor.name)}*'s email: ${email}`);
+  } else {
+    // Show all contact info
+    const lines = [];
+    lines.push(`*${escapeSlackMrkdwn(investor.name)}* — Contact Info:`);
+    lines.push(`Phone: ${investor.phone || 'Not on file'}`);
+    lines.push(`Email: ${investor.email || 'Not on file'}`);
+    lines.push(`Company: ${escapeSlackMrkdwn(investor.company || 'N/A')}`);
+    lines.push(`Status: ${escapeSlackMrkdwn(investor.status)} | Deal: ${escapeSlackMrkdwn(investor.dealInterest || 'N/A')}`);
+    lines.push(`:point_right: <${investor.link}|Open in Monday>`);
+    await say(lines.join('\n'));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// NEW: Count Investors handler — pipeline summary by status
+// ---------------------------------------------------------------------------
+
+async function handleCountInvestors(say) {
+  try {
+    const investors = await getActiveInvestors();
+    if (!investors || investors.length === 0) {
+      await say('No active investors found in Monday.com.');
+      return;
+    }
+
+    // Count by status
+    const statusCounts = {};
+    for (const inv of investors) {
+      const status = inv.status || 'Unknown';
+      statusCounts[status] = (statusCounts[status] || 0) + 1;
+    }
+
+    const lines = [];
+    lines.push(`:bar_chart: *Investor Pipeline — ${investors.length} total active investors:*`);
+    lines.push('');
+
+    for (const [status, count] of Object.entries(statusCounts).sort((a, b) => b[1] - a[1])) {
+      lines.push(`• ${escapeSlackMrkdwn(status)}: ${count}`);
+    }
+
+    // Overdue count
+    const now = new Date();
+    now.setHours(0, 0, 0, 0);
+    const overdueCount = investors.filter((inv) => {
+      if (!inv.nextFollowUp) return false;
+      const fu = new Date(inv.nextFollowUp);
+      fu.setHours(0, 0, 0, 0);
+      return fu < now;
+    }).length;
+
+    if (overdueCount > 0) {
+      lines.push('');
+      lines.push(`:red_circle: ${overdueCount} investor(s) with overdue follow-ups`);
+    }
+
+    await say(lines.join('\n'));
+  } catch (err) {
+    console.error('[slack/commands] count investors error:', err.message);
+    await say('Something went wrong. Please try again.');
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Register all command listeners
 // ---------------------------------------------------------------------------
 
@@ -534,11 +762,19 @@ function registerCommands(app) {
     if (!shouldProcess(message)) return;
     if (!(await isCorrectChannel(message, client))) return;
 
-    const text = (message.text || '').trim();
-    if (!text) return;
+    // Message deduplication — skip already-processed messages
+    if (processedMessages.has(message.ts)) return;
+    processedMessages.set(message.ts, Date.now());
+
+    const rawText = (message.text || '').trim();
+    if (!rawText) return;
 
     // Ignore messages from the bot itself
     if (message.user === config.slack.botUserId) return;
+
+    // Clean Slack formatting for parsing (strip markdown, decode tel/mailto/url)
+    const text = cleanSlackText(rawText);
+    if (!text) return;
 
     try {
       // ── FAST PATH: regex matching for common commands ──
@@ -583,6 +819,31 @@ function registerCommands(app) {
         return;
       }
 
+      // Check for missing info — ask targeted follow-up question
+      if (intent.missing_info && intent.missing_info.length > 0) {
+        const missing = intent.missing_info[0]; // Focus on the most important missing field
+        const actionLabel = {
+          schedule_followup: 'schedule a follow-up',
+          assign_followup: 'assign a follow-up',
+          log_touchpoint: 'log a contact',
+          check_status: 'check the status',
+          contact_info: 'look up contact info',
+        }[intent.action] || 'do that';
+
+        if (missing === 'investorName') {
+          await say(`Got it, you want to ${actionLabel}. Which investor are you referring to?`);
+          return;
+        }
+        if (missing === 'assignee') {
+          await say(`Got it, you want to ${actionLabel} for *${escapeSlackMrkdwn(intent.investorName || 'the investor')}*. Who should I assign this to?`);
+          return;
+        }
+        if (missing === 'date') {
+          await say(`Got it, you want to ${actionLabel} for *${escapeSlackMrkdwn(intent.investorName || 'the investor')}*. When should the follow-up be?`);
+          return;
+        }
+      }
+
       // Route based on parsed action
       switch (intent.action) {
         case 'schedule_followup':
@@ -615,6 +876,19 @@ function registerCommands(app) {
 
         case 'test_monday':
           await handleTestMonday(say);
+          break;
+
+        case 'add_investor':
+          // Pass raw text (not cleaned) to preserve full contact info
+          await handleAddInvestor(rawText, say);
+          break;
+
+        case 'contact_info':
+          await handleContactInfo(intent.investorName, intent.contactField, say);
+          break;
+
+        case 'count_investors':
+          await handleCountInvestors(say);
           break;
 
         default:

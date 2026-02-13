@@ -11,9 +11,10 @@ A Slack bot (deployed on Railway) that integrates with Monday.com to track inves
 - **Monday.com client:** `src/monday/client.js` — GraphQL client using native `fetch`, includes `API-Version: 2024-10` header
 - **Monday.com queries:** `src/monday/queries.js` — `getActiveInvestors()` reads board items with column value parsing
 - **Monday.com mutations:** `src/monday/mutations.js` — `updateNextFollowUp`, `updateLastContactDate`, `updateAssignedTo`, `removeGoingColdFlag`, `testMondayWrite`
-- **AI intent parser:** `src/ai/intentParser.js` — Anthropic Claude NLU for conversational message parsing (extracts action, investor name, date, assignee)
+- **AI intent parser:** `src/ai/intentParser.js` — Anthropic Claude NLU for conversational message parsing (extracts action, investor name, date, assignee, missing_info)
+- **AI contact parser:** `src/ai/contactParser.js` — Anthropic Claude parses pasted contact info (name, phone, email, LinkedIn, notes) for multiple contacts
 - **AI suggestions:** `src/ai/suggestions.js` — Claude-powered follow-up suggestions for daily digest
-- **User mapping:** `src/utils/userMapping.js` — Slack ↔ Monday.com user resolution with in-memory caching (matches by email/name)
+- **User mapping:** `src/utils/userMapping.js` — Slack ↔ Monday.com user resolution with hardcoded team IDs + in-memory caching (matches by email/name)
 - **Reminders store:** `src/reminders/store.js` — persistence to `reminders.json`, `addReminder()` stores investor context
 - **Reminders checker:** `src/reminders/checker.js` — 60-second `setInterval` polling loop, posts Slack notifications when reminders are due
 - **Date parser:** `src/utils/dateParser.js` — chrono-node wrapper, defaults to 9am ET, handles timezone abbreviations
@@ -22,10 +23,13 @@ A Slack bot (deployed on Railway) that integrates with Monday.com to track inves
 - **Cron jobs:** `src/scheduler/cron.js` — daily scan, weekly summary, stale alerts, 15-min polling
 
 ## Message Processing Pipeline
-1. **Fast regex path** — well-known commands matched instantly (zero latency): "test monday", "who's overdue", "status on X", "contacted X today"
-2. **NLU path** — if no regex match, message is sent to Anthropic Claude for intent parsing
-3. **Intent routing** — parsed intent dispatched to handler: `schedule_followup`, `assign_followup`, `log_touchpoint`, `check_status`, `list_overdue`, `list_by_status`, `list_not_contacted`, `test_monday`
-4. **Confidence threshold** — intents with confidence < 0.5 trigger a conversational "I'm not sure" help response
+1. **Deduplication** — skip already-processed messages via `processedMessages` Map
+2. **Slack text cleaning** — strip markdown formatting, decode `<tel:>`, `<mailto:>`, `<url|text>` Slack formatting
+3. **Fast regex path** — well-known commands matched instantly (zero latency): "test monday", "who's overdue", "status on X", "contacted X today"
+4. **NLU path** — if no regex match, message is sent to Anthropic Claude for intent parsing
+5. **Missing info** — if NLU detects missing required fields, bot asks targeted follow-up question
+6. **Intent routing** — parsed intent dispatched to handler: `schedule_followup`, `assign_followup`, `log_touchpoint`, `check_status`, `list_overdue`, `list_by_status`, `list_not_contacted`, `test_monday`, `add_investor`, `contact_info`, `count_investors`
+7. **Confidence threshold** — intents with confidence < 0.5 trigger a conversational "I'm not sure" help response
 
 ## Key Technical Details
 - **Monday.com Board ID:** 18399326252
@@ -55,9 +59,18 @@ The bot understands natural language in the configured channel:
 - `im:write` — DM assigned users (falls back to channel mention if missing)
 - `connections:write` — Socket Mode
 
+## Team Member Slack IDs (hardcoded in userMapping.js)
+- Anton → U0A9BRJSS2U
+- Alejandro → U0A9BLW5480
+- Freddie → U0AF1LGMSAU
+- Jim → U0A8HSQCKML
+- Nate → U0A8HGP7BDG
+- Deatrich → U0AE7C9LK8A
+- Austin → U0A8WESSL81
+
 ## Recent Changes (Feb 2026)
 1. Added Anthropic Claude NLU intent parsing (`src/ai/intentParser.js`) — replaces rigid regex for conversational messages
-2. Added Slack ↔ Monday.com user mapping (`src/utils/userMapping.js`) with 1-hour cache
+2. Added Slack ↔ Monday.com user mapping (`src/utils/userMapping.js`) with 1-hour cache + hardcoded team member lookup
 3. Added `updateAssignedTo()` mutation for Monday.com people column
 4. Added DM notification system (`src/slack/notifications.js`) with channel fallback
 5. Added `assign_followup` handler — resolves assignee, updates Monday.com, sends DM
@@ -65,3 +78,12 @@ The bot understands natural language in the configured channel:
 7. Updated daily digest to tag assigned users with `<@USERID>` via Slack user map
 8. Conversational response style (no more rigid ✅ emoji confirmations)
 9. Kept all existing functionality: regex fast-path, touchpoint logging, cadence, cron jobs, reminders
+10. **Add New Investor** (`src/ai/contactParser.js`) — parses pasted contact info via Claude, creates Monday.com items with phone/email/LinkedIn/notes, handles multiple contacts in one message, checks for duplicates
+11. **Contact Info Lookup** — "what's Scott's phone?", "contact info for X" — returns phone/email from Monday.com
+12. **Investor Count** — "how many investors do we have" — pipeline summary by status with overdue count
+13. **Message Deduplication** — `processedMessages` Map prevents double-processing, auto-cleans every 5 minutes
+14. **Slack Text Cleaning** — `cleanSlackText()` strips markdown (backticks, bold, italic), decodes `<tel:>`, `<mailto:>`, `<url|text>` Slack formatting before NLU
+15. **Error Handling & Retry** — Monday.com client retries once on 429/5xx errors after 30-second delay
+16. **Preposition Stripping** — `stripNamePrefix()` in `resolveInvestor()` strips "with/for/to/on" as defense-in-depth
+17. **Missing Info Follow-ups** — NLU returns `missing_info` array; bot asks targeted questions like "Which investor?" instead of generic help
+18. **`createInvestor()` mutation** in `mutations.js` — uses `create_item` GraphQL mutation, sets phone/email/LinkedIn/notes/nextFollowUp, defaults to Cold/New Lead group

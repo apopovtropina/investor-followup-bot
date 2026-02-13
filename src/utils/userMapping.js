@@ -6,6 +6,30 @@
 const config = require('../config');
 const { mondayApi } = require('../monday/client');
 
+// ---------------------------------------------------------------------------
+// Hardcoded team member Slack ID lookup (fast, no API call needed)
+// ---------------------------------------------------------------------------
+const TEAM_SLACK_IDS = {
+  anton: 'U0A9BRJSS2U',
+  alejandro: 'U0A9BLW5480',
+  freddie: 'U0AF1LGMSAU',
+  jim: 'U0A8HSQCKML',
+  nate: 'U0A8HGP7BDG',
+  deatrich: 'U0AE7C9LK8A',
+  austin: 'U0A8WESSL81',
+};
+
+/**
+ * Look up a team member's Slack user ID by first name (case-insensitive).
+ * @param {string} name
+ * @returns {string|null} Slack user ID or null
+ */
+function getTeamSlackId(name) {
+  if (!name) return null;
+  const key = name.toLowerCase().trim().split(/\s+/)[0]; // first name only
+  return TEAM_SLACK_IDS[key] || null;
+}
+
 // In-memory cache: slackUserId → { mondayPersonId, name, email, cachedAt }
 const cache = new Map();
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -160,10 +184,17 @@ async function resolveNameToMonday(slackClient, name) {
   }
 
   try {
+    // 1. Try hardcoded team lookup first (instant, no API call)
+    const teamSlackId = getTeamSlackId(name);
+    if (teamSlackId) {
+      console.log(`[userMapping] Hardcoded team match: "${name}" → ${teamSlackId}`);
+      return resolveSlackUserToMonday(slackClient, teamSlackId);
+    }
+
+    // 2. Fall back to Slack API search
     const lowerName = name.toLowerCase().trim();
     let cursor;
 
-    // Search Slack users by name
     do {
       const result = await slackClient.users.list({ limit: 200, cursor });
 
@@ -179,7 +210,6 @@ async function resolveNameToMonday(slackClient, name) {
           realName === lowerName ||
           firstName === lowerName
         ) {
-          // Found the Slack user — now map to Monday.com
           return resolveSlackUserToMonday(slackClient, user.id);
         }
       }
@@ -187,7 +217,7 @@ async function resolveNameToMonday(slackClient, name) {
       cursor = result.response_metadata && result.response_metadata.next_cursor;
     } while (cursor);
 
-    // No Slack user found — try Monday.com directly by name
+    // 3. No Slack user found — try Monday.com directly by name
     console.warn(`[userMapping] No Slack user found for name "${name}", trying Monday.com directly`);
     const mondayUser = await findMondayUser(name, null);
 
@@ -207,4 +237,6 @@ module.exports = {
   resolveSlackUserToMonday,
   resolveNameToMonday,
   getMondayUsers,
+  getTeamSlackId,
+  TEAM_SLACK_IDS,
 };

@@ -277,6 +277,111 @@ async function updateAssignedTo(itemId, mondayPersonId) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Create new investor item
+// ---------------------------------------------------------------------------
+
+const CREATE_ITEM = `
+  mutation ($boardId: ID!, $groupId: String, $itemName: String!, $columnValues: JSON!) {
+    create_item(
+      board_id: $boardId,
+      group_id: $groupId,
+      item_name: $itemName,
+      column_values: $columnValues
+    ) {
+      id
+      name
+    }
+  }
+`;
+
+/**
+ * Create a new investor item on the Monday.com board.
+ *
+ * @param {Object} investor - Contact info
+ * @param {string} investor.name    - Full name (used as item name)
+ * @param {string} [investor.phone] - Phone number
+ * @param {string} [investor.email] - Email address
+ * @param {string} [investor.linkedin] - LinkedIn URL
+ * @param {string} [investor.notes] - Notes / context
+ * @param {string} [investor.status] - Status label (defaults to "Cold / New Lead")
+ * @param {string} [investor.nextFollowUp] - YYYY-MM-DD date string
+ * @returns {Promise<{id: string, name: string, link: string}|null>}
+ */
+async function createInvestor(investor) {
+  try {
+    const columnValues = {};
+
+    // Phone column: Monday.com phone format
+    if (investor.phone) {
+      columnValues[config.monday.columns.phone] = {
+        phone: investor.phone,
+        countryShortName: 'US',
+      };
+    }
+
+    // Email column
+    if (investor.email) {
+      columnValues[config.monday.columns.email] = {
+        email: investor.email,
+        text: investor.email,
+      };
+    }
+
+    // LinkedIn / Link column
+    if (investor.linkedin) {
+      columnValues['link_mm0dsbax'] = {
+        url: investor.linkedin,
+        text: 'LinkedIn',
+      };
+    }
+
+    // Notes / long text column
+    if (investor.notes) {
+      columnValues[config.monday.columns.notes] = {
+        text: investor.notes,
+      };
+    }
+
+    // Next Follow-Up date
+    if (investor.nextFollowUp) {
+      columnValues[config.monday.columns.nextFollowUp] = {
+        date: investor.nextFollowUp,
+      };
+    }
+
+    console.log(`[monday/mutations] createInvestor: name="${investor.name}" cols=${JSON.stringify(columnValues)}`);
+
+    const data = await mondayApi(CREATE_ITEM, {
+      boardId: BOARD_ID,
+      groupId: config.monday.groups.coldNewLeads,  // Default to Cold / New Lead group
+      itemName: investor.name,
+      columnValues: JSON.stringify(columnValues),
+    });
+
+    if (data && data.create_item) {
+      const newItem = data.create_item;
+      console.log(`[monday/mutations] createInvestor succeeded: id=${newItem.id} name="${newItem.name}"`);
+      return {
+        id: newItem.id,
+        name: newItem.name,
+        link: config.monday.boardUrl + newItem.id,
+      };
+    }
+    return null;
+  } catch (err) {
+    console.error(`[monday/mutations] createInvestor FAILED:`, err.message);
+    console.error(`[monday/mutations] Error details:`, JSON.stringify({
+      graphqlErrors: err.graphqlErrors,
+      errorCode: err.errorCode,
+      statusCode: err.statusCode,
+      responseBody: err.responseBody,
+      stack: err.stack,
+    }, null, 2));
+    return null;
+  }
+}
+
 module.exports = {
   updateColumnValue,
   updateNextFollowUp,
@@ -286,4 +391,5 @@ module.exports = {
   removeGoingColdFlag,
   testMondayWrite,
   updateAssignedTo,
+  createInvestor,
 };
