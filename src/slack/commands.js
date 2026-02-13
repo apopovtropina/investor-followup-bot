@@ -81,6 +81,15 @@ function formatDateReadable(date) {
   });
 }
 
+/**
+ * Strip leading prepositions from investor names.
+ * Both the regex fast-path and NLU may leave prepositions like
+ * "with", "for", "to", "on" at the start of the extracted name.
+ */
+function stripNamePrefix(name) {
+  return name.replace(/^(?:with|for|to|on|about|regarding)\s+/i, '').trim();
+}
+
 function shouldProcess(message) {
   if (message.bot_id || message.subtype) return false;
   return true;
@@ -96,6 +105,10 @@ async function isCorrectChannel(message, client) {
  * Resolve an investor name from message text using fuzzy matching.
  */
 async function resolveInvestor(searchName) {
+  // Always strip leading prepositions (with, for, to, on, about, regarding)
+  // as defense-in-depth — both regex and NLU paths may leave them attached
+  const cleanName = stripNamePrefix(searchName);
+
   let investors;
   try {
     investors = await getActiveInvestors();
@@ -107,19 +120,19 @@ async function resolveInvestor(searchName) {
     return { investor: null, error: 'No active investors found in Monday.com.' };
   }
 
-  const result = findBestMatch(searchName, investors);
+  const result = findBestMatch(cleanName, investors);
 
   if (!result) {
     return {
       investor: null,
-      error: `I couldn't find an investor matching "${escapeSlackMrkdwn(searchName)}". Please check the spelling and try again.`,
+      error: `I couldn't find an investor matching "${escapeSlackMrkdwn(cleanName)}". Please check the spelling and try again.`,
     };
   }
 
   if (result.score > 0.35) {
     return {
       investor: null,
-      error: `I couldn't find a close match for "${escapeSlackMrkdwn(searchName)}". Did you mean one of these?\n${investors
+      error: `I couldn't find a close match for "${escapeSlackMrkdwn(cleanName)}". Did you mean one of these?\n${investors
         .slice(0, 5)
         .map((i) => `• ${i.name}`)
         .join('\n')}`,
@@ -545,14 +558,14 @@ function registerCommands(app) {
       // Status check: "status on X" / "check on X"
       const statusMatch = text.match(REGEX_PATTERNS.statusCheck);
       if (statusMatch) {
-        await handleCheckStatus(statusMatch[1].trim(), say);
+        await handleCheckStatus(stripNamePrefix(statusMatch[1].trim()), say);
         return;
       }
 
       // Touchpoint: "contacted X today" / "spoke with X"
       const touchpointMatch = text.match(REGEX_PATTERNS.touchpoint);
       if (touchpointMatch) {
-        const name = touchpointMatch[1].trim();
+        const name = stripNamePrefix(touchpointMatch[1].trim());
         await handleLogTouchpoint({ investorName: name }, message, client, say);
         return;
       }
