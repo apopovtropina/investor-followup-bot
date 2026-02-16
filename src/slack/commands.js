@@ -19,6 +19,9 @@ const {
   testMondayWrite,
   updateAssignedTo,
   createInvestor,
+  createFollowUpActivity,
+  logCommunication,
+  deleteItem,
 } = require('../monday/mutations');
 const { findBestMatch } = require('../utils/nameMatch');
 const { escapeSlackMrkdwn } = require('../utils/helpers');
@@ -404,6 +407,35 @@ async function handleLogTouchpoint(intent, message, client, say) {
     await removeGoingColdFlag(investor.id, investor.name);
   }
 
+  // Write follow-up activity to Relationship Management board
+  try {
+    await createFollowUpActivity({
+      investorName: investor.name,
+      investorStatus: investor.status,
+      lastContactDate: todayStr,
+      nextFollowUp: nextDateStr || undefined,
+      email: investor.email || undefined,
+      phone: investor.phone || undefined,
+      notes: `Touchpoint logged via Slack on ${todayStr}`,
+      linkedInvestorId: investor.id,
+    });
+  } catch (rmErr) {
+    console.error('[slack/commands] Failed to write to Relationship Management board:', rmErr.message);
+  }
+
+  // Log to Communications Log board
+  try {
+    await logCommunication({
+      name: `Follow-up: ${investor.name}`,
+      commType: 'Ad Hoc / Other',
+      dateSent: todayStr,
+      sendStatus: 'Sent',
+      notes: `Touchpoint logged via Slack. Status: ${investor.status}. Deal: ${investor.dealInterest || 'N/A'}`,
+    });
+  } catch (commsErr) {
+    console.error('[slack/commands] Failed to log to Communications board:', commsErr.message);
+  }
+
   let confirmMsg = `Logged it — *${escapeSlackMrkdwn(investor.name)}* marked as contacted today.`;
   if (nextDateStr && tier) {
     confirmMsg += ` Next follow-up is auto-set for *${nextDateStr}* based on ${escapeSlackMrkdwn(investor.status)} cadence (${tier.autoNextDays} days).`;
@@ -548,12 +580,24 @@ async function handleTestMonday(say) {
     }
 
     const testInvestor = investors[0];
-    await say(`:mag: Testing write on item: *${escapeSlackMrkdwn(testInvestor.name)}* (ID: ${testInvestor.id})`);
+    await say(`:mag: Testing write on Investor List item: *${escapeSlackMrkdwn(testInvestor.name)}* (ID: ${testInvestor.id})\nTesting create on Relationship Management board (${config.monday.boards.relationshipManagement})`);
 
     const result = await testMondayWrite(testInvestor.id);
 
     if (result.success) {
-      await say(`:white_check_mark: Monday.com write test PASSED! Response: \`${JSON.stringify(result.data)}\``);
+      let msg = `:white_check_mark: Monday.com write test PASSED!\n• Investor List write: OK\n• Relationship Management create: OK (item ID: ${result.testItemId})`;
+
+      // Clean up test item
+      if (result.testItemId) {
+        const deleted = await deleteItem(result.testItemId);
+        if (deleted) {
+          msg += '\n• Test item deleted: OK';
+        } else {
+          msg += '\n• Test item cleanup failed — please delete manually';
+        }
+      }
+
+      await say(msg);
     } else {
       await say(`:x: Monday.com write test FAILED!\nError: \`${result.error}\`\nCheck Railway logs for full details.`);
     }

@@ -1,7 +1,15 @@
 const config = require('../config');
 const { mondayApi } = require('./client');
 
-const BOARD_ID = String(config.monday.boards.investorList);
+// Board IDs
+const INVESTOR_LIST_BOARD_ID = String(config.monday.boards.investorList);
+const RM_BOARD_ID = String(config.monday.boards.relationshipManagement);
+const COMMS_LOG_BOARD_ID = String(config.monday.boards.communicationsLog);
+
+// Column references
+const investorCols = config.monday.columns;   // Investor List (READ board)
+const rmCols = config.monday.rmColumns;       // Relationship Management (WRITE board)
+const commsCols = config.monday.commsColumns;  // Communications Log
 
 // ---------------------------------------------------------------------------
 // GraphQL mutation templates
@@ -32,8 +40,31 @@ const CHANGE_MULTIPLE_VALUES = `
   }
 `;
 
+const CREATE_ITEM = `
+  mutation ($boardId: ID!, $groupId: String, $itemName: String!, $columnValues: JSON!) {
+    create_item(
+      board_id: $boardId,
+      group_id: $groupId,
+      item_name: $itemName,
+      column_values: $columnValues,
+      create_labels_if_missing: true
+    ) {
+      id
+      name
+    }
+  }
+`;
+
+const MOVE_ITEM_TO_GROUP = `
+  mutation ($itemId: ID!, $groupId: String!) {
+    move_item_to_group(item_id: $itemId, group_id: $groupId) {
+      id
+    }
+  }
+`;
+
 // ---------------------------------------------------------------------------
-// Mutation helpers
+// Mutation helpers — Investor List board (updates to existing investors)
 // ---------------------------------------------------------------------------
 
 /**
@@ -41,14 +72,15 @@ const CHANGE_MULTIPLE_VALUES = `
  *
  * @param {string|number} itemId      - The Monday item ID
  * @param {string}        columnId    - Ignored when using change_multiple; kept for API compat
- * @param {string}        value       - JSON string of column values, e.g. '{"date_col": {"date": "2025-01-01"}}'
+ * @param {string}        value       - JSON string of column values
+ * @param {string}        [boardId]   - Board ID (defaults to Investor List)
  */
-async function updateColumnValue(itemId, columnId, value) {
+async function updateColumnValue(itemId, columnId, value, boardId) {
+  const targetBoard = boardId || INVESTOR_LIST_BOARD_ID;
   try {
-    console.log(`[monday/mutations] updateColumnValue: item=${itemId} col=${columnId} value=${value}`);
-    console.log(`[monday/mutations] boardId=${BOARD_ID} (type: ${typeof BOARD_ID}), itemId=${String(itemId)} (type: string)`);
+    console.log(`[monday/mutations] updateColumnValue: board=${targetBoard} item=${itemId} col=${columnId} value=${value}`);
     const data = await mondayApi(CHANGE_MULTIPLE_VALUES, {
-      boardId: BOARD_ID,
+      boardId: targetBoard,
       itemId: String(itemId),
       columnValues: value,
     });
@@ -68,21 +100,17 @@ async function updateColumnValue(itemId, columnId, value) {
 }
 
 /**
- * Set the "Next Follow-Up" date column.
- *
- * @param {string|number} itemId  - The Monday item ID
- * @param {string}        dateStr - Date in YYYY-MM-DD format
+ * Set the "Next Follow-Up" date column on the Investor List board.
  */
 async function updateNextFollowUp(itemId, dateStr) {
   try {
     const columnValues = JSON.stringify({
-      [config.monday.columns.nextFollowUp]: { date: dateStr },
+      [investorCols.nextFollowUp]: { date: dateStr },
     });
-    console.log(`[monday/mutations] updateNextFollowUp: item=${itemId} date=${dateStr} columnValues=${columnValues}`);
-    console.log(`[monday/mutations] boardId=${BOARD_ID}, column=${config.monday.columns.nextFollowUp}`);
+    console.log(`[monday/mutations] updateNextFollowUp: item=${itemId} date=${dateStr}`);
 
     const data = await mondayApi(CHANGE_MULTIPLE_VALUES, {
-      boardId: BOARD_ID,
+      boardId: INVESTOR_LIST_BOARD_ID,
       itemId: String(itemId),
       columnValues,
     });
@@ -90,33 +118,22 @@ async function updateNextFollowUp(itemId, dateStr) {
     return data;
   } catch (err) {
     console.error(`[monday/mutations] updateNextFollowUp FAILED for item ${itemId}:`, err.message);
-    console.error(`[monday/mutations] Error details:`, JSON.stringify({
-      graphqlErrors: err.graphqlErrors,
-      errorCode: err.errorCode,
-      statusCode: err.statusCode,
-      responseBody: err.responseBody,
-      stack: err.stack,
-    }, null, 2));
     return null;
   }
 }
 
 /**
- * Set the "Last Contact Date" column.
- *
- * @param {string|number} itemId  - The Monday item ID
- * @param {string}        dateStr - Date in YYYY-MM-DD format
+ * Set the "Last Contact Date" column on the Investor List board.
  */
 async function updateLastContactDate(itemId, dateStr) {
   try {
     const columnValues = JSON.stringify({
-      [config.monday.columns.lastContactDate]: { date: dateStr },
+      [investorCols.lastContactDate]: { date: dateStr },
     });
-    console.log(`[monday/mutations] updateLastContactDate: item=${itemId} date=${dateStr} columnValues=${columnValues}`);
-    console.log(`[monday/mutations] boardId=${BOARD_ID}, column=${config.monday.columns.lastContactDate}`);
+    console.log(`[monday/mutations] updateLastContactDate: item=${itemId} date=${dateStr}`);
 
     const data = await mondayApi(CHANGE_MULTIPLE_VALUES, {
-      boardId: BOARD_ID,
+      boardId: INVESTOR_LIST_BOARD_ID,
       itemId: String(itemId),
       columnValues,
     });
@@ -124,28 +141,18 @@ async function updateLastContactDate(itemId, dateStr) {
     return data;
   } catch (err) {
     console.error(`[monday/mutations] updateLastContactDate FAILED for item ${itemId}:`, err.message);
-    console.error(`[monday/mutations] Error details:`, JSON.stringify({
-      graphqlErrors: err.graphqlErrors,
-      errorCode: err.errorCode,
-      statusCode: err.statusCode,
-      responseBody: err.responseBody,
-      stack: err.stack,
-    }, null, 2));
     return null;
   }
 }
 
 /**
- * Update an item's name.
- *
- * @param {string|number} itemId  - The Monday item ID
- * @param {string}        newName - The new name for the item
+ * Update an item's name on the Investor List board.
  */
 async function updateItemName(itemId, newName) {
   try {
     console.log(`[monday/mutations] updateItemName: item=${itemId} newName="${newName}"`);
     const data = await mondayApi(CHANGE_SIMPLE_VALUE, {
-      boardId: BOARD_ID,
+      boardId: INVESTOR_LIST_BOARD_ID,
       itemId: String(itemId),
       columnId: 'name',
       value: newName,
@@ -154,111 +161,44 @@ async function updateItemName(itemId, newName) {
     return data;
   } catch (err) {
     console.error(`[monday/mutations] updateItemName FAILED for item ${itemId}:`, err.message);
-    console.error(`[monday/mutations] Error details:`, JSON.stringify({
-      graphqlErrors: err.graphqlErrors,
-      errorCode: err.errorCode,
-      statusCode: err.statusCode,
-      responseBody: err.responseBody,
-      stack: err.stack,
-    }, null, 2));
     return null;
   }
 }
 
 /**
  * Prepend the "going cold" indicator to an investor's name if not already present.
- *
- * @param {string|number} itemId      - The Monday item ID
- * @param {string}        currentName - The investor's current name
  */
 async function addGoingColdFlag(itemId, currentName) {
   const FLAG = '\uD83D\uDD34'; // Red circle emoji
-
-  if (currentName.startsWith(FLAG)) {
-    // Already flagged, nothing to do
-    return null;
-  }
-
+  if (currentName.startsWith(FLAG)) return null;
   const newName = `${FLAG} ${currentName}`;
   return updateItemName(itemId, newName);
 }
 
 /**
  * Remove the "going cold" indicator from an investor's name if present.
- *
- * @param {string|number} itemId      - The Monday item ID
- * @param {string}        currentName - The investor's current name
  */
 async function removeGoingColdFlag(itemId, currentName) {
   const FLAG = '\uD83D\uDD34'; // Red circle emoji
-
-  if (!currentName.startsWith(FLAG)) {
-    // No flag to remove
-    return null;
-  }
-
-  // Remove the flag and any trailing space (u flag needed for emoji surrogate pair)
+  if (!currentName.startsWith(FLAG)) return null;
   const newName = currentName.replace(/^\uD83D\uDD34\s*/u, '');
   return updateItemName(itemId, newName);
 }
 
 /**
- * Diagnostic test: attempts a minimal hardcoded write to Monday.com.
- * Used to verify API token permissions and column_values format.
- *
- * @param {string|number} testItemId - Item ID to test with
- * @returns {Promise<{ success: boolean, data?: object, error?: string }>}
- */
-async function testMondayWrite(testItemId) {
-  const today = new Date();
-  const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-
-  const columnValues = JSON.stringify({
-    [config.monday.columns.lastContactDate]: { date: dateStr },
-  });
-
-  console.log('[monday/mutations] TEST WRITE starting...');
-  console.log(`[monday/mutations] TEST boardId=${BOARD_ID} itemId=${testItemId} columnValues=${columnValues}`);
-
-  try {
-    const data = await mondayApi(CHANGE_MULTIPLE_VALUES, {
-      boardId: BOARD_ID,
-      itemId: String(testItemId),
-      columnValues,
-    });
-    console.log('[monday/mutations] TEST WRITE succeeded:', JSON.stringify(data));
-    return { success: true, data };
-  } catch (err) {
-    console.error('[monday/mutations] TEST WRITE FAILED:', err.message);
-    console.error('[monday/mutations] TEST error details:', JSON.stringify({
-      graphqlErrors: err.graphqlErrors,
-      errorCode: err.errorCode,
-      statusCode: err.statusCode,
-      responseBody: err.responseBody,
-    }, null, 2));
-    return { success: false, error: err.message };
-  }
-}
-
-/**
- * Update the "Assigned To" people column on an investor item.
- *
- * @param {string|number} itemId        - The Monday item ID
- * @param {string}        mondayPersonId - The Monday.com user/person ID to assign
- * @returns {Promise<object|null>} Mutation result or null on failure
+ * Update the "Assigned To" people column on an investor item (Investor List board).
  */
 async function updateAssignedTo(itemId, mondayPersonId) {
   try {
-    // People column format: {"personsAndTeams":[{"id":PERSON_ID,"kind":"person"}]}
     const columnValues = JSON.stringify({
-      [config.monday.columns.assignedTo]: {
+      [investorCols.assignedTo]: {
         personsAndTeams: [{ id: Number(mondayPersonId), kind: 'person' }],
       },
     });
     console.log(`[monday/mutations] updateAssignedTo: item=${itemId} person=${mondayPersonId}`);
 
     const data = await mondayApi(CHANGE_MULTIPLE_VALUES, {
-      boardId: BOARD_ID,
+      boardId: INVESTOR_LIST_BOARD_ID,
       itemId: String(itemId),
       columnValues,
     });
@@ -266,86 +206,39 @@ async function updateAssignedTo(itemId, mondayPersonId) {
     return data;
   } catch (err) {
     console.error(`[monday/mutations] updateAssignedTo FAILED for item ${itemId}:`, err.message);
-    console.error(`[monday/mutations] Error details:`, JSON.stringify({
-      graphqlErrors: err.graphqlErrors,
-      errorCode: err.errorCode,
-      statusCode: err.statusCode,
-      responseBody: err.responseBody,
-      stack: err.stack,
-    }, null, 2));
     return null;
   }
 }
 
-// ---------------------------------------------------------------------------
-// Create new investor item
-// ---------------------------------------------------------------------------
-
-const CREATE_ITEM = `
-  mutation ($boardId: ID!, $groupId: String, $itemName: String!, $columnValues: JSON!) {
-    create_item(
-      board_id: $boardId,
-      group_id: $groupId,
-      item_name: $itemName,
-      column_values: $columnValues
-    ) {
-      id
-      name
-    }
-  }
-`;
-
 /**
- * Create a new investor item on the Monday.com board.
- *
- * @param {Object} investor - Contact info
- * @param {string} investor.name    - Full name (used as item name)
- * @param {string} [investor.phone] - Phone number
- * @param {string} [investor.email] - Email address
- * @param {string} [investor.linkedin] - LinkedIn URL
- * @param {string} [investor.notes] - Notes / context
- * @param {string} [investor.status] - Status label (defaults to "Cold / New Lead")
- * @param {string} [investor.nextFollowUp] - YYYY-MM-DD date string
- * @returns {Promise<{id: string, name: string, link: string}|null>}
+ * Create a new investor item on the Investor List board.
  */
 async function createInvestor(investor) {
   try {
     const columnValues = {};
 
-    // Phone column: Monday.com phone format
     if (investor.phone) {
-      columnValues[config.monday.columns.phone] = {
+      columnValues[investorCols.phone] = {
         phone: investor.phone,
         countryShortName: 'US',
       };
     }
 
-    // Email column
     if (investor.email) {
-      columnValues[config.monday.columns.email] = {
+      columnValues[investorCols.email] = {
         email: investor.email,
         text: investor.email,
       };
     }
 
-    // LinkedIn / Link column
-    if (investor.linkedin) {
-      columnValues['link_mm0dsbax'] = {
-        url: investor.linkedin,
-        text: 'LinkedIn',
-      };
-    }
-
-    // Notes / long text column
     if (investor.notes) {
-      columnValues[config.monday.columns.notes] = {
+      columnValues[investorCols.notes] = {
         text: investor.notes,
       };
     }
 
-    // Next Follow-Up date
     if (investor.nextFollowUp) {
-      columnValues[config.monday.columns.nextFollowUp] = {
+      columnValues[investorCols.nextFollowUp] = {
         date: investor.nextFollowUp,
       };
     }
@@ -353,8 +246,8 @@ async function createInvestor(investor) {
     console.log(`[monday/mutations] createInvestor: name="${investor.name}" cols=${JSON.stringify(columnValues)}`);
 
     const data = await mondayApi(CREATE_ITEM, {
-      boardId: BOARD_ID,
-      groupId: config.monday.groups.coldNewLeads,  // Default to Cold / New Lead group
+      boardId: INVESTOR_LIST_BOARD_ID,
+      groupId: config.monday.groups.coldNewLeads,
       itemName: investor.name,
       columnValues: JSON.stringify(columnValues),
     });
@@ -371,13 +264,250 @@ async function createInvestor(investor) {
     return null;
   } catch (err) {
     console.error(`[monday/mutations] createInvestor FAILED:`, err.message);
-    console.error(`[monday/mutations] Error details:`, JSON.stringify({
-      graphqlErrors: err.graphqlErrors,
-      errorCode: err.errorCode,
-      statusCode: err.statusCode,
-      responseBody: err.responseBody,
-      stack: err.stack,
-    }, null, 2));
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Relationship Management board — WRITE follow-up activity
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a follow-up activity item on the Relationship Management board.
+ *
+ * @param {Object} opts
+ * @param {string} opts.investorName      - Investor name (item name)
+ * @param {string} [opts.investorStatus]  - Status label (e.g. "🔥 Hot Lead")
+ * @param {string} [opts.cadence]         - Follow-up cadence label
+ * @param {string} [opts.lastContactDate] - YYYY-MM-DD
+ * @param {string} [opts.nextFollowUp]    - YYYY-MM-DD
+ * @param {string} [opts.commMethod]      - Communication method label
+ * @param {string} [opts.email]           - Investor email
+ * @param {string} [opts.phone]           - Investor phone
+ * @param {string} [opts.notes]           - Notes text
+ * @param {number} [opts.linkedInvestorId]- Item ID from Investor List to link
+ * @param {number} [opts.personId]        - Monday.com user ID to assign
+ * @returns {Promise<{id: string, name: string, link: string}|null>}
+ */
+async function createFollowUpActivity(opts) {
+  try {
+    const columnValues = {};
+    const today = new Date().toISOString().split('T')[0];
+
+    if (opts.investorStatus) {
+      columnValues[rmCols.investorStatus] = { label: opts.investorStatus };
+    }
+    if (opts.cadence) {
+      columnValues[rmCols.followUpCadence] = { label: opts.cadence };
+    }
+    if (opts.lastContactDate) {
+      columnValues[rmCols.lastContactDate] = { date: opts.lastContactDate };
+    }
+    if (opts.nextFollowUp) {
+      columnValues[rmCols.nextFollowUp] = { date: opts.nextFollowUp };
+    }
+    if (opts.commMethod) {
+      columnValues[rmCols.communicationMethod] = { label: opts.commMethod };
+    }
+    if (opts.email) {
+      columnValues[rmCols.email] = { email: opts.email, text: opts.email };
+    }
+    if (opts.phone) {
+      columnValues[rmCols.phone] = { phone: opts.phone, countryShortName: 'US' };
+    }
+    if (opts.notes) {
+      columnValues[rmCols.notes] = { text: opts.notes };
+    }
+    if (opts.linkedInvestorId) {
+      columnValues[rmCols.linkedInvestor] = { item_ids: [Number(opts.linkedInvestorId)] };
+    }
+    if (opts.personId) {
+      columnValues[rmCols.person] = {
+        personsAndTeams: [{ id: Number(opts.personId), kind: 'person' }],
+      };
+    }
+    // Set the date column to today
+    columnValues[rmCols.date] = { date: today };
+
+    console.log(`[monday/mutations] createFollowUpActivity: name="${opts.investorName}" cols=${JSON.stringify(columnValues)}`);
+
+    const data = await mondayApi(CREATE_ITEM, {
+      boardId: RM_BOARD_ID,
+      groupId: config.monday.rmGroups.activeFollowUps,
+      itemName: opts.investorName,
+      columnValues: JSON.stringify(columnValues),
+    });
+
+    if (data && data.create_item) {
+      const newItem = data.create_item;
+      console.log(`[monday/mutations] createFollowUpActivity succeeded: id=${newItem.id}`);
+      return {
+        id: newItem.id,
+        name: newItem.name,
+        link: config.monday.rmBoardUrl + newItem.id,
+      };
+    }
+    return null;
+  } catch (err) {
+    console.error(`[monday/mutations] createFollowUpActivity FAILED:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * Move a follow-up item to the Completed group on the Relationship Management board.
+ */
+async function completeFollowUp(itemId) {
+  try {
+    console.log(`[monday/mutations] completeFollowUp: item=${itemId}`);
+    const data = await mondayApi(MOVE_ITEM_TO_GROUP, {
+      itemId: String(itemId),
+      groupId: config.monday.rmGroups.completedFollowUps,
+    });
+    console.log(`[monday/mutations] completeFollowUp succeeded for item ${itemId}`);
+    return data;
+  } catch (err) {
+    console.error(`[monday/mutations] completeFollowUp FAILED for item ${itemId}:`, err.message);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Communications Log board — LOG communications
+// ---------------------------------------------------------------------------
+
+/**
+ * Log a communication to the Investor Communications Log board.
+ *
+ * @param {Object} opts
+ * @param {string} opts.name              - Item name (e.g. "Follow-up: John Doe")
+ * @param {string} [opts.commType]        - Communication Type label
+ * @param {string} [opts.dealSPV]         - Deal / SPV text
+ * @param {string} [opts.dateSent]        - YYYY-MM-DD
+ * @param {string} [opts.sendStatus]      - Send Status label (defaults to "Sent")
+ * @param {number} [opts.sentByPersonId]  - Monday.com user ID
+ * @param {string} [opts.notes]           - Notes text
+ * @param {string} [opts.groupId]         - Group ID (defaults to adHocCommunications)
+ * @returns {Promise<{id: string, name: string}|null>}
+ */
+async function logCommunication(opts) {
+  try {
+    const columnValues = {};
+    const today = new Date().toISOString().split('T')[0];
+
+    if (opts.commType) {
+      columnValues[commsCols.communicationType] = { label: opts.commType };
+    }
+    if (opts.dealSPV) {
+      columnValues[commsCols.dealSPV] = opts.dealSPV;
+    }
+    columnValues[commsCols.dateSent] = { date: opts.dateSent || today };
+    columnValues[commsCols.sendStatus] = { label: opts.sendStatus || 'Sent' };
+
+    if (opts.sentByPersonId) {
+      columnValues[commsCols.sentBy] = {
+        personsAndTeams: [{ id: Number(opts.sentByPersonId), kind: 'person' }],
+      };
+    }
+    if (opts.notes) {
+      columnValues[commsCols.notes] = { text: opts.notes };
+    }
+
+    const groupId = opts.groupId || config.monday.commsGroups.adHocCommunications;
+
+    console.log(`[monday/mutations] logCommunication: name="${opts.name}" group=${groupId}`);
+
+    const data = await mondayApi(CREATE_ITEM, {
+      boardId: COMMS_LOG_BOARD_ID,
+      groupId,
+      itemName: opts.name,
+      columnValues: JSON.stringify(columnValues),
+    });
+
+    if (data && data.create_item) {
+      const newItem = data.create_item;
+      console.log(`[monday/mutations] logCommunication succeeded: id=${newItem.id}`);
+      return { id: newItem.id, name: newItem.name };
+    }
+    return null;
+  } catch (err) {
+    console.error(`[monday/mutations] logCommunication FAILED:`, err.message);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic test
+// ---------------------------------------------------------------------------
+
+/**
+ * Diagnostic test: attempts a minimal write to the Relationship Management board.
+ */
+async function testMondayWrite(testItemId) {
+  const today = new Date();
+  const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+
+  console.log('[monday/mutations] TEST WRITE starting...');
+
+  // Test 1: Read from Investor List board
+  console.log(`[monday/mutations] TEST READ: board=${INVESTOR_LIST_BOARD_ID} item=${testItemId}`);
+  try {
+    const readValues = JSON.stringify({
+      [investorCols.lastContactDate]: { date: dateStr },
+    });
+    const readData = await mondayApi(CHANGE_MULTIPLE_VALUES, {
+      boardId: INVESTOR_LIST_BOARD_ID,
+      itemId: String(testItemId),
+      columnValues: readValues,
+    });
+    console.log('[monday/mutations] TEST READ WRITE succeeded:', JSON.stringify(readData));
+  } catch (err) {
+    console.error('[monday/mutations] TEST Investor List write FAILED:', err.message);
+    return { success: false, error: `Investor List write failed: ${err.message}` };
+  }
+
+  // Test 2: Create item on Relationship Management board
+  console.log(`[monday/mutations] TEST CREATE on RM board=${RM_BOARD_ID}`);
+  try {
+    const rmColumnValues = JSON.stringify({
+      [rmCols.investorStatus]: { label: '🔵 Cold / New' },
+      [rmCols.lastContactDate]: { date: dateStr },
+      [rmCols.nextFollowUp]: { date: dateStr },
+      [rmCols.notes]: { text: 'API test — this item can be deleted.' },
+    });
+
+    const createData = await mondayApi(CREATE_ITEM, {
+      boardId: RM_BOARD_ID,
+      groupId: config.monday.rmGroups.activeFollowUps,
+      itemName: '[TEST] API Write Test',
+      columnValues: rmColumnValues,
+    });
+
+    if (createData && createData.create_item) {
+      const newId = createData.create_item.id;
+      console.log(`[monday/mutations] TEST CREATE succeeded: id=${newId}`);
+      return { success: true, data: createData, testItemId: newId };
+    }
+    return { success: false, error: 'Create returned no data' };
+  } catch (err) {
+    console.error('[monday/mutations] TEST RM write FAILED:', err.message);
+    return { success: false, error: `RM board write failed: ${err.message}` };
+  }
+}
+
+/**
+ * Delete a test item (used after testMondayWrite to clean up).
+ */
+async function deleteItem(itemId) {
+  try {
+    const data = await mondayApi(
+      'mutation ($itemId: ID!) { delete_item(item_id: $itemId) { id } }',
+      { itemId: String(itemId) }
+    );
+    console.log(`[monday/mutations] deleteItem succeeded: ${itemId}`);
+    return data;
+  } catch (err) {
+    console.error(`[monday/mutations] deleteItem FAILED: ${itemId}`, err.message);
     return null;
   }
 }
@@ -392,4 +522,8 @@ module.exports = {
   testMondayWrite,
   updateAssignedTo,
   createInvestor,
+  createFollowUpActivity,
+  completeFollowUp,
+  logCommunication,
+  deleteItem,
 };

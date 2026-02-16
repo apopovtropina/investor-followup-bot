@@ -1,5 +1,7 @@
 require('dotenv').config();
 
+const mondayBoards = require('./config/monday-boards');
+
 module.exports = {
   slack: {
     botToken: process.env.SLACK_BOT_TOKEN,
@@ -14,36 +16,38 @@ module.exports = {
     apiToken: process.env.MONDAY_API_TOKEN,
     apiUrl: 'https://api.monday.com/v2',
     boards: {
-      investorList: 18399326252,
-      communicationsLog: 18399326425,
-      activeOfferings: 18399326336,
+      investorList: mondayBoards.investorList.boardId,
+      relationshipManagement: mondayBoards.relationshipManagement.boardId,
+      communicationsLog: mondayBoards.communicationsLog.boardId,
+      activeOfferings: mondayBoards.activeOfferings.boardId,
+      newsletter: mondayBoards.newsletter.boardId,
+      investorFileTracker: mondayBoards.investorFileTracker.boardId,
     },
-    columns: {
-      name: 'name',
-      status: 'color_mm0d1f8z',
-      email: 'email_mm0dh83c',
-      phone: 'phone_mm0dymr8',
-      company: 'text_mm0da4z4',
-      investorType: 'dropdown_mm0dtj0p',
-      source: 'dropdown_mm0dxpzg',
-      referredBy: 'text_mm0db450',
-      investmentInterest: 'numeric_mm0dx8ez',
-      dealInterest: 'dropdown_mm0dvrsf',
-      assignedTo: 'multiple_person_mm0dq26t',
-      lastContactDate: 'date_mm0dm8y0',
-      nextFollowUp: 'date_mm0drsbg',
-      notes: 'long_text_mm0dvjg7',
-    },
-    groups: {
-      hotLeads: 'group_mm0dyh04',
-      warmProspects: 'group_mm0d4mqk',
-      coldNewLeads: 'group_mm0ddbx',
-      committed: 'group_mm0d4m6g',
-      funded: 'group_mm0d45zg',
-      passed: 'group_mm0d7bte',
-    },
-    boardUrl: 'https://elitecapitalgroup.monday.com/boards/18399326252/pulses/',
+    // Investor List columns (READ — investor data)
+    columns: mondayBoards.investorList.columns,
+    // Investor List groups
+    groups: mondayBoards.investorList.groups,
+    // Investor List board URL (for investor links)
+    boardUrl: mondayBoards.investorList.boardUrl,
+
+    // Relationship Management columns (WRITE — follow-up activity)
+    rmColumns: mondayBoards.relationshipManagement.columns,
+    // Relationship Management groups
+    rmGroups: mondayBoards.relationshipManagement.groups,
+    // Relationship Management board URL
+    rmBoardUrl: mondayBoards.relationshipManagement.boardUrl,
+
+    // Communications Log columns (WRITE — communication records)
+    commsColumns: mondayBoards.communicationsLog.columns,
+    commsGroups: mondayBoards.communicationsLog.groups,
+    commsLabels: mondayBoards.communicationsLog,
+
+    // Team user IDs
+    team: mondayBoards.team,
   },
+
+  // Full board configs (for direct access when needed)
+  mondayBoards,
 
   anthropic: {
     apiKey: process.env.ANTHROPIC_API_KEY,
@@ -57,11 +61,12 @@ module.exports = {
     from: process.env.SMTP_FROM || 'Elite Capital Follow-Up Bot <bot@elitecapitalgroup.co>',
   },
 
-  // Tiered follow-up cadence (Feature 2)
+  // Tiered follow-up cadence
   cadence: {
     '🔥 Hot Lead': { minDays: 1, maxDays: 3, coldAfter: 4, autoNextDays: 1 },
     '🟡 Warm Prospect': { minDays: 5, maxDays: 7, coldAfter: 8, autoNextDays: 5 },
     '🔵 Cold / New Lead': { minDays: 14, maxDays: 21, coldAfter: 22, autoNextDays: 14 },
+    '🔵 Cold / New': { minDays: 14, maxDays: 21, coldAfter: 22, autoNextDays: 14 },
     '✅ Committed': { minDays: 7, maxDays: 7, coldAfter: 10, autoNextDays: 7 },
     '💰 Funded': { minDays: 30, maxDays: 30, coldAfter: 45, autoNextDays: 30 },
   },

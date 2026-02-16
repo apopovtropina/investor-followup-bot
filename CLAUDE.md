@@ -10,7 +10,7 @@ A Slack bot (deployed on Railway) that integrates with Monday.com to track inves
 - **Slack notifications:** `src/slack/notifications.js` — DM notifications for follow-up assignments with channel fallback
 - **Monday.com client:** `src/monday/client.js` — GraphQL client using native `fetch`, includes `API-Version: 2024-10` header
 - **Monday.com queries:** `src/monday/queries.js` — `getActiveInvestors()` reads board items with column value parsing
-- **Monday.com mutations:** `src/monday/mutations.js` — `updateNextFollowUp`, `updateLastContactDate`, `updateAssignedTo`, `removeGoingColdFlag`, `testMondayWrite`
+- **Monday.com mutations:** `src/monday/mutations.js` — `updateNextFollowUp`, `updateLastContactDate`, `updateAssignedTo`, `removeGoingColdFlag`, `testMondayWrite`, `createFollowUpActivity` (writes to Relationship Management), `logCommunication` (writes to Communications Log), `deleteItem`
 - **AI intent parser:** `src/ai/intentParser.js` — Anthropic Claude NLU for conversational message parsing (extracts action, investor name, date, assignee, missing_info)
 - **AI contact parser:** `src/ai/contactParser.js` — Anthropic Claude parses pasted contact info (name, phone, email, LinkedIn, notes) for multiple contacts
 - **AI suggestions:** `src/ai/suggestions.js` — Claude-powered follow-up suggestions for daily digest
@@ -19,7 +19,8 @@ A Slack bot (deployed on Railway) that integrates with Monday.com to track inves
 - **Reminders checker:** `src/reminders/checker.js` — 60-second `setInterval` polling loop, posts Slack notifications when reminders are due
 - **Date parser:** `src/utils/dateParser.js` — chrono-node wrapper, defaults to 9am ET, handles timezone abbreviations
 - **Name matching:** `src/utils/nameMatch.js` — Fuse.js fuzzy matching (threshold 0.35)
-- **Config:** `src/config.js` — board ID `18399326252`, all column IDs, timezone `America/New_York`, cadence tiers
+- **Centralized board config:** `src/config/monday-boards.js` — all board IDs, column IDs, group IDs, team user IDs
+- **Config:** `src/config.js` — imports from `config/monday-boards.js`, exposes multi-board architecture, timezone `America/New_York`, cadence tiers
 - **Cron jobs:** `src/scheduler/cron.js` — daily scan, weekly summary, stale alerts, 15-min polling
 
 ## Message Processing Pipeline
@@ -32,8 +33,16 @@ A Slack bot (deployed on Railway) that integrates with Monday.com to track inves
 7. **Confidence threshold** — intents with confidence < 0.5 trigger a conversational "I'm not sure" help response
 
 ## Key Technical Details
-- **Monday.com Board ID:** 18399326252
-- **Column IDs:** status=`color_mm0d1f8z`, assignedTo=`multiple_person_mm0dq26t`, lastContactDate=`date_mm0dm8y0`, nextFollowUp=`date_mm0drsbg`, notes=`long_text_mm0dvjg7`
+- **Multi-board architecture (Feb 2026 audit):**
+  - **Investor List** (18399326252) — READ investor data
+  - **Relationship Management** (18399401453) — WRITE follow-up activity (groups: `topics`=Active, `group_title`=Completed)
+  - **Communications Log** (18399326425) — LOG communications
+  - **Active Offerings** (18399326336) — deal context for AI suggestions
+  - **Newsletter** (18399401340) — newsletter bot
+  - **File Tracker** (18399207642) — file collection bot
+- **Investor List Columns:** status=`color_mm0d1f8z`, email=`email_mm0dh83c`, phone=`phone_mm0dymr8`, assignedTo=`multiple_person_mm0dq26t`, lastContactDate=`date_mm0dm8y0`, nextFollowUp=`date_mm0drsbg`, notes=`long_text_mm0dvjg7`
+- **RM Columns:** investorStatus=`color_mm0mbm8z`, cadence=`color_mm0m5rtx`, lastContact=`date_mm0m92td`, nextFollowUp=`date_mm0mme0w`, commMethod=`color_mm0m1ysc`, email=`email_mm0mjwa8`, phone=`phone_mm0m8ye5`, notes=`long_text_mm0mrnn5`, linkedInvestor=`board_relation_mm0myg9c`
+- **Team User IDs:** Anton=98265513, Alejandro=67053759, Casey=98514143
 - **Slack Channel:** #monday-investor-followups (`C0ADB93MTLP`)
 - **Slack Socket Mode** — no webhook URLs needed
 - **Deployed on Railway** — auto-deploys from GitHub pushes to `main`
@@ -87,3 +96,6 @@ The bot understands natural language in the configured channel:
 16. **Preposition Stripping** — `stripNamePrefix()` in `resolveInvestor()` strips "with/for/to/on" as defense-in-depth
 17. **Missing Info Follow-ups** — NLU returns `missing_info` array; bot asks targeted questions like "Which investor?" instead of generic help
 18. **`createInvestor()` mutation** in `mutations.js` — uses `create_item` GraphQL mutation, sets phone/email/LinkedIn/notes/nextFollowUp, defaults to Cold/New Lead group
+19. **Multi-board write architecture** (Feb 15 2026) — touchpoints now write to Relationship Management board (follow-up activity) AND Communications Log board in addition to updating Investor List
+20. **Centralized board config** (`src/config/monday-boards.js`) — single source of truth for all Monday.com board IDs, column IDs, group IDs, team user IDs
+21. **New mutations:** `createFollowUpActivity()` writes to RM board, `logCommunication()` writes to Comms Log, `completeFollowUp()` moves to Completed group, `deleteItem()` for test cleanup
