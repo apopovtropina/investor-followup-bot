@@ -3,7 +3,9 @@
 // ---------------------------------------------------------------------------
 // Listens for incoming webhooks from Monday.com on POST /webhook/monday.
 // Handles the Monday.com webhook verification challenge and routes status-
-// change events to the handler.
+// change events to the handler for both boards:
+//   - Relationship Management (18399401453) → Investor Status
+//   - Investor List (18399326252) → Communication Status
 //
 // Monday.com webhook flow:
 //   1. You create a webhook via Monday.com API or UI
@@ -44,11 +46,12 @@ function registerWebhookRoutes(expressApp, slackClient) {
 
     // Process asynchronously so we don't block the response
     const eventType = body.event.type || 'unknown';
+    const boardId = body.event.boardId || 'unknown';
     const columnId = body.event.columnId || 'unknown';
     const itemId = body.event.itemId || 'unknown';
 
     console.log(
-      `[webhook/server] Received event: type=${eventType} column=${columnId} item=${itemId}`
+      `[webhook/server] Received event: type=${eventType} board=${boardId} column=${columnId} item=${itemId}`
     );
 
     try {
