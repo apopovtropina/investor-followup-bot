@@ -200,9 +200,11 @@ async function resolveInvestor(searchName) {
 
 const REGEX_PATTERNS = {
   testMonday: /^test\s+monday$/i,
-  overdue: /(?:who'?s?\s+overdue|overdue\s+investors)/i,
-  statusCheck: /(?:status\s+on|check\s+on)\s+(.+)/i,
-  touchpoint: /(?:contacted|spoke\s+with|reached\s+out\s+to)\s+(.+?)(?:\s+today)?$/i,
+  overdue: /(?:who'?s?\s+overdue|overdue\s+(?:investors|follow[- ]?ups)|what\s+follow[- ]?ups?\s+(?:are|is)\s+(?:late|overdue))/i,
+  statusCheck: /(?:(?:status\s+(?:on|of)|check\s+on|check\s+(?:the\s+)?status\s+(?:of|on))\s+(.+)|how'?s?\s+(.+?)\s+doing)/i,
+  touchpoint: /(?:contacted|spoke\s+with|reached\s+out\s+to|just\s+(?:got\s+off|had)\s+a\s+call\s+with|had\s+a\s+meeting\s+with)\s+(.+?)(?:\s+today)?$/i,
+  scheduleFollowUp: /(?:schedule\s+(?:a\s+)?follow[- ]?up|set\s+(?:a\s+)?follow[- ]?up|remind\s+me\s+to\s+(?:call|follow\s+up\s+with))(?:\s+(?:with|for)\s+(.+?))?(?:\s+(?:for|on|by|this|next|tomorrow)\s+(.+))?$/i,
+  logContact: /(?:log\s+(?:a\s+)?(?:contact|touchpoint)|mark\s+(?:as\s+)?contacted)(?:\s+(?:with|for)\s+(.+?))?$/i,
 };
 
 // ---------------------------------------------------------------------------
@@ -831,21 +833,49 @@ function registerCommands(app) {
 
       // Who's overdue
       if (REGEX_PATTERNS.overdue.test(text)) {
+        console.log('[slack/commands] Regex match: overdue');
         await handleListOverdue(say);
         return;
       }
 
-      // Status check: "status on X" / "check on X"
+      // Schedule follow-up: "schedule a follow-up", "schedule follow-up with X for Friday"
+      const scheduleMatch = text.match(REGEX_PATTERNS.scheduleFollowUp);
+      if (scheduleMatch) {
+        const investorName = scheduleMatch[1] ? stripNamePrefix(scheduleMatch[1].trim()) : null;
+        const dateExpr = scheduleMatch[2] ? scheduleMatch[2].trim() : null;
+        console.log(`[slack/commands] Regex match: scheduleFollowUp investor="${investorName || 'none'}" date="${dateExpr || 'none'}"`);
+        await handleScheduleFollowUp(
+          { investorName, date: dateExpr, assignee: null },
+          message, client, say
+        );
+        return;
+      }
+
+      // Log contact: "log a contact", "log a contact with X", "mark contacted X"
+      const logContactMatch = text.match(REGEX_PATTERNS.logContact);
+      if (logContactMatch) {
+        const investorName = logContactMatch[1] ? stripNamePrefix(logContactMatch[1].trim()) : null;
+        console.log(`[slack/commands] Regex match: logContact investor="${investorName || 'none'}"`);
+        await handleLogTouchpoint({ investorName }, message, client, say);
+        return;
+      }
+
+      // Status check: "status on X" / "check on X" / "how's X doing"
       const statusMatch = text.match(REGEX_PATTERNS.statusCheck);
       if (statusMatch) {
-        await handleCheckStatus(stripNamePrefix(statusMatch[1].trim()), say);
-        return;
+        const name = (statusMatch[1] || statusMatch[2] || '').trim();
+        if (name) {
+          console.log(`[slack/commands] Regex match: statusCheck investor="${name}"`);
+          await handleCheckStatus(stripNamePrefix(name), say);
+          return;
+        }
       }
 
       // Touchpoint: "contacted X today" / "spoke with X"
       const touchpointMatch = text.match(REGEX_PATTERNS.touchpoint);
       if (touchpointMatch) {
         const name = stripNamePrefix(touchpointMatch[1].trim());
+        console.log(`[slack/commands] Regex match: touchpoint investor="${name}"`);
         await handleLogTouchpoint({ investorName: name }, message, client, say);
         return;
       }
@@ -853,10 +883,23 @@ function registerCommands(app) {
       // ── NLU PATH: send to Claude for intent parsing ──
       console.log(`[slack/commands] No regex match for "${text}" — sending to NLU`);
 
-      const intent = await parseIntent(text);
+      let intent;
+      try {
+        intent = await parseIntent(text);
+        console.log(`[slack/commands] NLU returned: action=${intent.action} confidence=${intent.confidence} error=${intent.error || 'none'}`);
+      } catch (nluErr) {
+        console.error(`[slack/commands] NLU call threw exception: ${nluErr.message}`);
+        await say(
+          "I'm not sure what you need — are you trying to schedule a follow-up, log a contact, or check on an investor? Just let me know and I'll help out."
+        );
+        return;
+      }
 
-      // If confidence is too low, treat as non-command
+      // If confidence is too low or NLU failed, treat as non-command
       if (intent.confidence < 0.5 || intent.action === 'unknown') {
+        if (intent.error) {
+          console.warn(`[slack/commands] NLU error caused fallback: ${intent.error}`);
+        }
         await say(
           "I'm not sure what you need — are you trying to schedule a follow-up, log a contact, or check on an investor? Just let me know and I'll help out."
         );
