@@ -5,7 +5,7 @@
 // Both the follow-up bot and newsletter bot should import from this file
 // to prevent breakage when Monday.com columns change.
 //
-// Last updated: 2026-02-15 (board audit)
+// Last updated: 2026-02-17 (board audit + webhook column IDs)
 // ===========================================================================
 
 module.exports = {
@@ -26,7 +26,7 @@ module.exports = {
       person:             'person',
       status:             'status',
       date:               'date4',
-      investorStatus:     'color_mm0mbm8z',
+      investorStatus:     'color_mm0nf6pz',
       followUpCadence:    'color_mm0m5rtx',
       lastContactDate:    'date_mm0m92td',
       nextFollowUp:       'date_mm0mme0w',
@@ -34,20 +34,31 @@ module.exports = {
       email:              'email_mm0mjwa8',
       phone:              'phone_mm0m8ye5',
       notes:              'long_text_mm0mrnn5',
-      linkedInvestor:     'board_relation_mm0myg9c',
+      linkedInvestor:     'board_relation_mm0nm1w5',
     },
     groups: {
       activeFollowUps:    'topics',
       completedFollowUps: 'group_title',
     },
-    // Status label options for investorStatus column
+    // Status label IDs for investorStatus column (color_mm0nf6pz)
+    investorStatusIds: {
+      pendingResponse:      0,
+      committed:            1,
+      urgentFollowUp:       2,
+      funded:               3,
+      inConversation:       4,
+      scheduled:            7,
+      onHold:               17,
+    },
+    // Status label text for investorStatus column
     investorStatusLabels: {
-      hotLead:     '🔥 Hot Lead',
-      warmProspect:'🟡 Warm Prospect',
-      coldNew:     '🔵 Cold / New',
-      committed:   '✅ Committed',
-      funded:      '💰 Funded',
-      passed:      '❌ Passed',
+      pendingResponse:      'Pending Response',
+      committed:            'Committed',
+      urgentFollowUp:       'Urgent Follow-Up Needed',
+      funded:               'Funded',
+      inConversation:       'In Conversation',
+      scheduled:            'Scheduled',
+      onHold:               'On Hold',
     },
     // Status label options for followUpCadence column
     cadenceLabels: {

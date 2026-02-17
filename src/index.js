@@ -8,16 +8,18 @@ const { setupCronJobs } = require('./scheduler/cron');
 const { loadReminders } = require('./reminders/store');
 const { startReminderChecker } = require('./reminders/checker');
 const { getActiveInvestors } = require('./monday/queries');
+const { registerWebhookRoutes } = require('./webhook/server');
 
 async function start() {
-  // Health check endpoint for Railway
+  // Health check + webhook endpoint for Railway
   const server = express();
   server.disable('x-powered-by');
+  server.use(express.json());
   server.get('/', (req, res) => {
     res.json({ status: 'ok' });
   });
-  server.listen(3000, () => {
-    console.log('[health] Health check endpoint running on port 3000');
+  server.listen(process.env.PORT || 3000, () => {
+    console.log(`[health] Health check + webhook endpoint running on port ${process.env.PORT || 3000}`);
   });
 
   // Validate critical env vars
@@ -94,6 +96,22 @@ async function start() {
       } else {
         console.error(`[startup] Failed to join channel ${channelId}:`, joinErr.message);
       }
+    }
+  }
+
+  // Register Monday.com webhook routes (uses the same Express server)
+  registerWebhookRoutes(server, app.client);
+
+  // Ensure bot has joined #monday-investor-followups for webhook notifications
+  const { FOLLOWUP_CHANNEL } = require('./webhook/handler');
+  try {
+    await app.client.conversations.join({ channel: FOLLOWUP_CHANNEL });
+    console.log(`[startup] Bot joined webhook notification channel ${FOLLOWUP_CHANNEL}`);
+  } catch (joinErr) {
+    if (joinErr.data?.error === 'already_in_channel') {
+      console.log(`[startup] Bot already in webhook notification channel ${FOLLOWUP_CHANNEL}`);
+    } else {
+      console.warn(`[startup] Could not join webhook channel ${FOLLOWUP_CHANNEL}: ${joinErr.message}`);
     }
   }
 
