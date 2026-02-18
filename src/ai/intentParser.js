@@ -24,7 +24,7 @@ You MUST respond with ONLY valid JSON — no markdown, no explanation, no code f
 
 The JSON must have this shape:
 {
-  "action": "schedule_followup" | "log_touchpoint" | "check_status" | "list_overdue" | "list_by_status" | "list_not_contacted" | "assign_followup" | "test_monday" | "add_investor" | "contact_info" | "count_investors" | "unknown",
+  "action": "schedule_followup" | "log_touchpoint" | "check_status" | "list_overdue" | "list_by_status" | "list_not_contacted" | "assign_followup" | "test_monday" | "add_investor" | "contact_info" | "count_investors" | "delete_followup" | "delete_contact" | "unknown",
   "investorName": string | null,
   "date": string | null,
   "assignee": string | null,
@@ -49,6 +49,8 @@ Field definitions:
   - "add_investor": User is pasting new contact information to add to the board. Signs: message contains a name AND at least one of (phone number, email address, LinkedIn URL). Phrases: "new contact:", "add investor:", "got a new lead:", or just raw contact info being pasted.
   - "contact_info": User wants to look up a specific investor's phone number, email, or contact details. Phrases: "what's X's phone", "X's email", "get me X's number", "contact info for X".
   - "count_investors": User wants a count or summary of investors by status. Phrases: "how many investors do we have", "investor count", "pipeline count".
+  - "delete_followup": User wants to delete or remove a follow-up from the tracking board. Phrases: "delete follow-up for X", "remove follow-up X", "cancel follow-up with X", "remove the follow-up for X".
+  - "delete_contact": User wants to delete or remove an investor/contact from the investor list. Phrases: "delete investor X", "remove contact X", "delete X from the board".
   - "unknown": Cannot determine intent.
 
 - investorName: The investor's name mentioned in the message. Extract the full name, stripping any leading prepositions (with, for, on, about, regarding). Return null if no investor is mentioned.
@@ -111,6 +113,21 @@ User: "what's Scott Pastel's phone number?"
 
 User: "how many investors do we have"
 → {"action":"count_investors","investorName":null,"date":null,"assignee":null,"assigneeIsSlackTag":false,"statusFilter":null,"daysSinceFilter":null,"contactField":null,"confidence":0.9,"missing_info":[]}
+
+User: "delete follow-up for Wyatt Heavy"
+→ {"action":"delete_followup","investorName":"Wyatt Heavy","date":null,"assignee":null,"assigneeIsSlackTag":false,"statusFilter":null,"daysSinceFilter":null,"contactField":null,"confidence":0.95,"missing_info":[]}
+
+User: "remove the follow-up for Scott Pastel"
+→ {"action":"delete_followup","investorName":"Scott Pastel","date":null,"assignee":null,"assigneeIsSlackTag":false,"statusFilter":null,"daysSinceFilter":null,"contactField":null,"confidence":0.95,"missing_info":[]}
+
+User: "cancel follow-up with Jalin Moore"
+→ {"action":"delete_followup","investorName":"Jalin Moore","date":null,"assignee":null,"assigneeIsSlackTag":false,"statusFilter":null,"daysSinceFilter":null,"contactField":null,"confidence":0.95,"missing_info":[]}
+
+User: "delete investor Bobby"
+→ {"action":"delete_contact","investorName":"Bobby","date":null,"assignee":null,"assigneeIsSlackTag":false,"statusFilter":null,"daysSinceFilter":null,"contactField":null,"confidence":0.95,"missing_info":[]}
+
+User: "remove contact Skyler Martin from the board"
+→ {"action":"delete_contact","investorName":"Skyler Martin","date":null,"assignee":null,"assigneeIsSlackTag":false,"statusFilter":null,"daysSinceFilter":null,"contactField":null,"confidence":0.95,"missing_info":[]}
 
 User: "schedule a follow-up"
 → {"action":"schedule_followup","investorName":null,"date":null,"assignee":null,"assigneeIsSlackTag":false,"statusFilter":null,"daysSinceFilter":null,"contactField":null,"confidence":0.7,"missing_info":["investorName"]}

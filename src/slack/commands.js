@@ -11,7 +11,7 @@
 // ---------------------------------------------------------------------------
 
 const config = require('../config');
-const { getActiveInvestors, getAllInvestors } = require('../monday/queries');
+const { getActiveInvestors, getAllInvestors, searchRMByInvestorName } = require('../monday/queries');
 const {
   updateNextFollowUp,
   updateLastContactDate,
@@ -20,6 +20,7 @@ const {
   updateAssignedTo,
   createInvestor,
   createFollowUpActivity,
+  updateRMItem,
   logCommunication,
   deleteItem,
 } = require('../monday/mutations');
@@ -46,6 +47,20 @@ setInterval(() => {
     if (time < fiveMinutesAgo) processedMessages.delete(ts);
   }
 }, 300000);
+
+// ---------------------------------------------------------------------------
+// Pending deletion confirmations — maps slackUserId to pending delete info
+// ---------------------------------------------------------------------------
+
+const pendingDeletions = new Map();
+
+// Clean up expired pending deletions every 2 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [userId, pending] of pendingDeletions) {
+    if (pending.expiresAt < now) pendingDeletions.delete(userId);
+  }
+}, 120000);
 
 // ---------------------------------------------------------------------------
 // Channel ID — use hardcoded ID from config, fall back to API lookup
@@ -99,7 +114,32 @@ function formatDateReadable(date) {
     weekday: 'short',
     month: 'short',
     day: 'numeric',
-    timeZone: 'America/New_York',
+    timeZone: 'America/Chicago',
+  });
+}
+
+/**
+ * Format a Date object to HH:MM:SS in Central Time for Monday.com date columns.
+ */
+function formatTimeCT(date) {
+  return date.toLocaleTimeString('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+    timeZone: 'America/Chicago',
+  });
+}
+
+/**
+ * Format a human-readable time string in Central Time.
+ */
+function formatTimeReadableCT(date) {
+  return date.toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZone: 'America/Chicago',
+    timeZoneName: 'short',
   });
 }
 
@@ -208,6 +248,13 @@ const REGEX_PATTERNS = {
   // Scenario A: "log contact" / "add contact" / "new contact" trigger phrases
   // Captures the trigger so we can check if there's inline info after it
   addContactTrigger: /^(?:log\s+(?:a\s+)?contact|add\s+(?:a\s+)?contact|new\s+contact)\s*(.*)/i,
+  // Delete follow-up from RM board
+  deleteFollowUp: /(?:delete|remove|cancel)\s+(?:the\s+)?follow[- ]?up\s+(?:for\s+|with\s+)?(.+)/i,
+  // Delete contact/investor from Investor List board
+  deleteContact: /(?:delete|remove)\s+(?:the\s+)?(?:contact|investor)\s+(.+)/i,
+  // Confirmation replies for pending deletions
+  confirmDelete: /^(?:yes|yeah|yep|confirm|do\s+it|go\s+ahead|delete\s+it)$/i,
+  cancelDelete: /^(?:no|nah|nope|cancel|never\s*mind|don'?t)$/i,
 };
 
 // ---------------------------------------------------------------------------
@@ -331,21 +378,72 @@ async function handleScheduleFollowUp(intent, message, client, say) {
   const { investor, error } = await resolveInvestor(searchName);
   if (error) { await say(error); return; }
 
-  // Parse date
+  // Parse date (now returns { date, hasTime })
   const dateExpression = intent.date || 'tomorrow';
-  const parsedDate = parseNaturalDate(dateExpression);
-  if (!parsedDate) {
+  const parseResult = parseNaturalDate(dateExpression);
+  if (!parseResult) {
     await say(`I couldn't figure out when you mean by "${escapeSlackMrkdwn(dateExpression)}". Try something like "tomorrow", "next Tuesday", or "Friday at 2pm".`);
     return;
   }
 
+  const { date: parsedDate, hasTime } = parseResult;
   const dateStr = formatDateYMD(parsedDate);
+  const timeStr = hasTime ? formatTimeCT(parsedDate) : null;
 
-  // Update Monday.com
+  // Update Investor List board (date only — no time support on this board)
   const result = await updateNextFollowUp(investor.id, dateStr);
   if (!result) {
     await say(`Sorry, I could not update Monday.com for ${escapeSlackMrkdwn(investor.name)}. Please try again or update it manually. :point_right: <${investor.link}|Open in Monday>`);
     return;
+  }
+
+  // Write to Relationship Management board (with time if specified)
+  const today = new Date();
+  const todayStr = formatDateYMD(today);
+  const todayTimeStr = formatTimeCT(today);
+
+  try {
+    // Search for existing RM item for this investor
+    const rmMatches = await searchRMByInvestorName(investor.name);
+
+    if (rmMatches && rmMatches.length > 0) {
+      // Update existing RM item
+      const rmItem = rmMatches[0];
+      const updateOpts = {
+        nextFollowUp: dateStr,
+        lastContactDate: todayStr,
+        lastContactTime: todayTimeStr,
+      };
+      if (timeStr) {
+        updateOpts.nextFollowUpTime = timeStr;
+        updateOpts.notes = `Follow-up scheduled for ${dateStr} at ${formatTimeReadableCT(parsedDate)} via Slack`;
+      } else {
+        updateOpts.notes = `Follow-up scheduled for ${dateStr} via Slack`;
+      }
+      await updateRMItem(rmItem.id, updateOpts);
+    } else {
+      // Create new RM item
+      const createOpts = {
+        investorName: investor.name,
+        investorStatus: investor.status,
+        lastContactDate: todayStr,
+        lastContactTime: todayTimeStr,
+        nextFollowUp: dateStr,
+        email: investor.email || undefined,
+        phone: investor.phone || undefined,
+        linkedInvestorId: investor.id,
+      };
+      if (timeStr) {
+        createOpts.nextFollowUpTime = timeStr;
+        createOpts.notes = `Follow-up scheduled for ${dateStr} at ${formatTimeReadableCT(parsedDate)} via Slack`;
+      } else {
+        createOpts.notes = `Follow-up scheduled for ${dateStr} via Slack`;
+      }
+      await createFollowUpActivity(createOpts);
+    }
+  } catch (rmErr) {
+    console.error('[slack/commands] Failed to write follow-up to RM board:', rmErr.message);
+    // Non-fatal — continue with the confirmation
   }
 
   // Store reminder
@@ -368,14 +466,13 @@ async function handleScheduleFollowUp(intent, message, client, say) {
   }
 
   // Time display
-  const hasTime = dateExpression.match(/\d{1,2}\s*(?:am|pm|:\d{2})/i);
-  let timeStr = '';
+  let timeDisplay = '';
   if (hasTime) {
-    timeStr = ` at ${parsedDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: config.timezone, timeZoneName: 'short' })}`;
+    timeDisplay = ` at ${formatTimeReadableCT(parsedDate)}`;
   }
 
   await say(
-    `Done! Follow-up with *${escapeSlackMrkdwn(investor.name)}* is set for *${formatDateReadable(parsedDate)}*${timeStr}.` +
+    `Done! Follow-up with *${escapeSlackMrkdwn(investor.name)}* is set for *${formatDateReadable(parsedDate)}*${timeDisplay}.` +
     ` Monday.com is updated.${hasTime ? ' :alarm_clock: I\'ll remind you when it\'s time.' : ''}` +
     ` :point_right: <${investor.link}|Open in Monday>` +
     ` Want me to assign this to someone specific?`
@@ -392,14 +489,15 @@ async function handleAssignFollowUp(intent, message, client, say) {
   const { investor, error } = await resolveInvestor(searchName);
   if (error) { await say(error); return; }
 
-  // Parse date
+  // Parse date (now returns { date, hasTime })
   const dateExpression = intent.date || 'tomorrow';
-  const parsedDate = parseNaturalDate(dateExpression);
-  if (!parsedDate) {
+  const parseResult = parseNaturalDate(dateExpression);
+  if (!parseResult) {
     await say(`I couldn't figure out when you mean by "${escapeSlackMrkdwn(dateExpression)}". Try "tomorrow", "next Tuesday", or "Friday".`);
     return;
   }
 
+  const { date: parsedDate } = parseResult;
   const dateStr = formatDateYMD(parsedDate);
 
   // Resolve the assignee to Slack + Monday.com
@@ -966,6 +1064,156 @@ async function handleLogNewContact(text, say) {
 }
 
 // ---------------------------------------------------------------------------
+// DELETE handlers — delete follow-ups or contacts with confirmation
+// ---------------------------------------------------------------------------
+
+/**
+ * Handle "delete follow-up [name]" — search RM board, ask for confirmation.
+ */
+async function handleDeleteFollowUp(investorName, userId, say) {
+  if (!investorName) {
+    await say("Which follow-up do you want to delete? Include the investor's name.");
+    return;
+  }
+
+  const cleanName = stripNamePrefix(investorName);
+
+  try {
+    const matches = await searchRMByInvestorName(cleanName);
+
+    if (!matches || matches.length === 0) {
+      await say(`I couldn't find a follow-up matching "${escapeSlackMrkdwn(cleanName)}" on the Relationship Management board.`);
+      return;
+    }
+
+    if (matches.length === 1) {
+      const item = matches[0];
+      const nextFU = item.nextFollowUp
+        ? item.nextFollowUp.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/Chicago' })
+        : 'N/A';
+
+      // Store pending deletion
+      pendingDeletions.set(userId, {
+        itemId: item.id,
+        itemName: item.name,
+        boardType: 'rm',
+        link: item.link,
+        expiresAt: Date.now() + 60000, // 1 minute to confirm
+      });
+
+      await say(
+        `:warning: Are you sure you want to delete the follow-up for *${escapeSlackMrkdwn(item.name)}*?\n` +
+        `Next follow-up: ${nextFU} | Status: ${escapeSlackMrkdwn(item.investorStatus || 'N/A')}\n` +
+        `<${item.link}|View in Monday>\n\n` +
+        `Reply *yes* to confirm or *no* to cancel. (Expires in 60 seconds)`
+      );
+    } else {
+      // Multiple matches — ask user to be more specific
+      const lines = [];
+      lines.push(`:mag: I found ${matches.length} follow-ups matching "${escapeSlackMrkdwn(cleanName)}":`);
+      for (const item of matches) {
+        const nextFU = item.nextFollowUp
+          ? item.nextFollowUp.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/Chicago' })
+          : 'N/A';
+        lines.push(`• *${escapeSlackMrkdwn(item.name)}* — Next: ${nextFU} — <${item.link}|View>`);
+      }
+      lines.push('\nPlease be more specific with the investor name.');
+      await say(lines.join('\n'));
+    }
+  } catch (err) {
+    console.error('[slack/commands] handleDeleteFollowUp error:', err.message);
+    await say('Something went wrong while searching for the follow-up. Please try again.');
+  }
+}
+
+/**
+ * Handle "delete contact/investor [name]" — search Investor List, ask for confirmation.
+ */
+async function handleDeleteContact(investorName, userId, say) {
+  if (!investorName) {
+    await say("Which contact do you want to delete? Include the investor's name.");
+    return;
+  }
+
+  const cleanName = stripNamePrefix(investorName);
+
+  try {
+    const investors = await getAllInvestors();
+    if (!investors || investors.length === 0) {
+      await say('No investors found on the board.');
+      return;
+    }
+
+    const result = findBestMatch(cleanName, investors);
+    if (!result || result.score > 0.35) {
+      await say(`I couldn't find an investor matching "${escapeSlackMrkdwn(cleanName)}". Please check the spelling and try again.`);
+      return;
+    }
+
+    const investor = result.match;
+
+    // Store pending deletion
+    pendingDeletions.set(userId, {
+      itemId: investor.id,
+      itemName: investor.name,
+      boardType: 'investor',
+      link: investor.link,
+      expiresAt: Date.now() + 60000, // 1 minute to confirm
+    });
+
+    await say(
+      `:warning: Are you sure you want to *permanently delete* the investor *${escapeSlackMrkdwn(investor.name)}* from the Investor List?\n` +
+      `Status: ${escapeSlackMrkdwn(investor.status || 'N/A')} | Email: ${investor.email || 'N/A'} | Phone: ${investor.phone || 'N/A'}\n` +
+      `<${investor.link}|View in Monday>\n\n` +
+      `:exclamation: This action is *permanent* and cannot be undone.\n` +
+      `Reply *yes* to confirm or *no* to cancel. (Expires in 60 seconds)`
+    );
+  } catch (err) {
+    console.error('[slack/commands] handleDeleteContact error:', err.message);
+    await say('Something went wrong while searching for the investor. Please try again.');
+  }
+}
+
+/**
+ * Handle confirmation of a pending deletion.
+ */
+async function handleConfirmDeletion(userId, say) {
+  const pending = pendingDeletions.get(userId);
+  if (!pending) return false; // No pending deletion
+
+  pendingDeletions.delete(userId);
+
+  if (pending.expiresAt < Date.now()) {
+    await say('That deletion request has expired. Please try again.');
+    return true;
+  }
+
+  try {
+    const result = await deleteItem(pending.itemId);
+    if (result) {
+      const boardLabel = pending.boardType === 'rm' ? 'Relationship Management board' : 'Investor List';
+      await say(`:white_check_mark: Deleted *${escapeSlackMrkdwn(pending.itemName)}* from the ${boardLabel}.`);
+    } else {
+      await say(`:x: Failed to delete *${escapeSlackMrkdwn(pending.itemName)}*. Please delete it manually in Monday.com. <${pending.link}|Open in Monday>`);
+    }
+  } catch (err) {
+    console.error('[slack/commands] handleConfirmDeletion error:', err.message);
+    await say(`:x: Something went wrong while deleting. Please try again or delete manually.`);
+  }
+
+  return true;
+}
+
+/**
+ * Handle cancellation of a pending deletion.
+ */
+function handleCancelDeletion(userId) {
+  if (!pendingDeletions.has(userId)) return false;
+  pendingDeletions.delete(userId);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Register all command listeners
 // ---------------------------------------------------------------------------
 
@@ -1003,6 +1251,23 @@ function registerCommands(app) {
     if (!text) return;
 
     try {
+      // ── CONFIRMATION FLOW: check for pending deletion confirmations ──
+      if (pendingDeletions.has(message.user)) {
+        if (REGEX_PATTERNS.confirmDelete.test(text)) {
+          console.log('[slack/commands] Confirm deletion');
+          const handled = await handleConfirmDeletion(message.user, say);
+          if (handled) return;
+        }
+        if (REGEX_PATTERNS.cancelDelete.test(text)) {
+          console.log('[slack/commands] Cancel deletion');
+          const cancelled = handleCancelDeletion(message.user);
+          if (cancelled) {
+            await say(':no_entry_sign: Deletion cancelled.');
+            return;
+          }
+        }
+      }
+
       // ── FAST PATH: regex matching for common commands ──
 
       // Test Monday (exact match)
@@ -1015,6 +1280,24 @@ function registerCommands(app) {
       if (REGEX_PATTERNS.overdue.test(text)) {
         console.log('[slack/commands] Regex match: overdue');
         await handleListOverdue(say);
+        return;
+      }
+
+      // Delete follow-up: "delete follow-up for X", "remove follow-up X", "cancel follow-up with X"
+      const deleteFollowUpMatch = text.match(REGEX_PATTERNS.deleteFollowUp);
+      if (deleteFollowUpMatch) {
+        const name = stripNamePrefix(deleteFollowUpMatch[1].trim());
+        console.log(`[slack/commands] Regex match: deleteFollowUp investor="${name}"`);
+        await handleDeleteFollowUp(name, message.user, say);
+        return;
+      }
+
+      // Delete contact/investor: "delete investor X", "remove contact X"
+      const deleteContactMatch = text.match(REGEX_PATTERNS.deleteContact);
+      if (deleteContactMatch) {
+        const name = stripNamePrefix(deleteContactMatch[1].trim());
+        console.log(`[slack/commands] Regex match: deleteContact investor="${name}"`);
+        await handleDeleteContact(name, message.user, say);
         return;
       }
 
@@ -1136,6 +1419,8 @@ function registerCommands(app) {
           log_touchpoint: 'log a contact',
           check_status: 'check the status',
           contact_info: 'look up contact info',
+          delete_followup: 'delete a follow-up',
+          delete_contact: 'delete an investor',
         }[intent.action] || 'do that';
 
         if (missing === 'investorName') {
@@ -1197,6 +1482,14 @@ function registerCommands(app) {
 
         case 'count_investors':
           await handleCountInvestors(say);
+          break;
+
+        case 'delete_followup':
+          await handleDeleteFollowUp(intent.investorName, message.user, say);
+          break;
+
+        case 'delete_contact':
+          await handleDeleteContact(intent.investorName, message.user, say);
           break;
 
         default:

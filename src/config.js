@@ -71,5 +71,5 @@ module.exports = {
     '💰 Funded': { minDays: 30, maxDays: 30, coldAfter: 45, autoNextDays: 30 },
   },
 
-  timezone: 'America/New_York',
+  timezone: 'America/Chicago',
 };

@@ -1,7 +1,9 @@
 const config = require('../config');
 const { mondayApi } = require('./client');
+const { findBestMatch } = require('../utils/nameMatch');
 
 const cols = config.monday.columns;
+const rmCols = config.monday.rmColumns;
 
 // ---------------------------------------------------------------------------
 // GraphQL fragments
@@ -68,7 +70,8 @@ function getDateValue(columnValues, colId) {
   if (!col) return null;
   const parsed = safeParse(col.value);
   if (parsed && parsed.date) {
-    const d = new Date(parsed.date + 'T00:00:00');
+    const timeStr = parsed.time || '00:00:00';
+    const d = new Date(parsed.date + 'T' + timeStr);
     return isNaN(d.getTime()) ? null : d;
   }
   return null;
@@ -249,10 +252,82 @@ async function getActiveOfferings() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Relationship Management board query functions
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a raw RM board item into a clean follow-up object.
+ */
+function parseRMItem(item) {
+  const cv = item.column_values;
+  return {
+    id: item.id,
+    name: item.name,
+    investorStatus: getTextValue(cv, rmCols.investorStatus),
+    followUpCadence: getTextValue(cv, rmCols.followUpCadence),
+    lastContactDate: getDateValue(cv, rmCols.lastContactDate),
+    nextFollowUp: getDateValue(cv, rmCols.nextFollowUp),
+    communicationMethod: getTextValue(cv, rmCols.communicationMethod),
+    email: getEmailValue(cv, rmCols.email),
+    phone: getPhoneValue(cv, rmCols.phone),
+    notes: getLongTextValue(cv, rmCols.notes),
+    link: /^\d+$/.test(String(item.id))
+      ? config.monday.rmBoardUrl + item.id
+      : '#',
+  };
+}
+
+/**
+ * Returns all items from the Relationship Management board.
+ */
+async function getRMBoardItems() {
+  try {
+    const items = await fetchAllBoardItems(config.monday.boards.relationshipManagement);
+    return items.map(parseRMItem);
+  } catch (err) {
+    console.error('[monday/queries] getRMBoardItems failed:', err.message);
+    return [];
+  }
+}
+
+/**
+ * Search the RM board for items matching an investor name (fuzzy match).
+ * Returns all items that match above the threshold.
+ *
+ * @param {string} name - Investor name to search for
+ * @returns {Promise<Array>} Matching RM items
+ */
+async function searchRMByInvestorName(name) {
+  try {
+    const rmItems = await getRMBoardItems();
+    if (!rmItems || rmItems.length === 0) return [];
+
+    const result = findBestMatch(name, rmItems);
+    if (!result || result.score > 0.35) return [];
+
+    // Return the best match and any close alternatives
+    const matches = [result.match];
+    if (result.alternatives) {
+      // Also fetch the actual items for close alternatives
+      for (const alt of result.alternatives) {
+        const altItem = rmItems.find((i) => i.name === alt.name);
+        if (altItem) matches.push(altItem);
+      }
+    }
+    return matches;
+  } catch (err) {
+    console.error('[monday/queries] searchRMByInvestorName failed:', err.message);
+    return [];
+  }
+}
+
 module.exports = {
   getActiveInvestors,
   getAllInvestors,
   getInvestorByName,
   getRecentCommunications,
   getActiveOfferings,
+  getRMBoardItems,
+  searchRMByInvestorName,
 };

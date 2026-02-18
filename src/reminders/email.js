@@ -44,7 +44,7 @@ async function sendReminderEmail({ to, investorName, investor, suggestion }) {
           month: 'short',
           day: 'numeric',
           year: 'numeric',
-          timeZone: 'America/New_York',
+          timeZone: 'America/Chicago',
         })
       : 'Never';
 

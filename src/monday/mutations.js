@@ -307,10 +307,14 @@ async function createFollowUpActivity(opts) {
       columnValues[rmCols.followUpCadence] = { label: opts.cadence };
     }
     if (opts.lastContactDate) {
-      columnValues[rmCols.lastContactDate] = { date: opts.lastContactDate };
+      const lcVal = { date: opts.lastContactDate };
+      if (opts.lastContactTime) lcVal.time = opts.lastContactTime;
+      columnValues[rmCols.lastContactDate] = lcVal;
     }
     if (opts.nextFollowUp) {
-      columnValues[rmCols.nextFollowUp] = { date: opts.nextFollowUp };
+      const nfVal = { date: opts.nextFollowUp };
+      if (opts.nextFollowUpTime) nfVal.time = opts.nextFollowUpTime;
+      columnValues[rmCols.nextFollowUp] = nfVal;
     }
     if (opts.commMethod) {
       columnValues[rmCols.communicationMethod] = { label: opts.commMethod };
@@ -356,6 +360,55 @@ async function createFollowUpActivity(opts) {
     return null;
   } catch (err) {
     console.error(`[monday/mutations] createFollowUpActivity FAILED:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * Update column values on an existing Relationship Management board item.
+ *
+ * @param {string|number} itemId - The RM item ID
+ * @param {Object} opts
+ * @param {string} [opts.nextFollowUp]      - YYYY-MM-DD
+ * @param {string} [opts.nextFollowUpTime]  - HH:MM:SS
+ * @param {string} [opts.lastContactDate]   - YYYY-MM-DD
+ * @param {string} [opts.lastContactTime]   - HH:MM:SS
+ * @param {string} [opts.notes]             - Notes text
+ * @param {string} [opts.investorStatus]    - Status label
+ * @returns {Promise<Object|null>}
+ */
+async function updateRMItem(itemId, opts) {
+  try {
+    const columnValues = {};
+
+    if (opts.nextFollowUp) {
+      const nfVal = { date: opts.nextFollowUp };
+      if (opts.nextFollowUpTime) nfVal.time = opts.nextFollowUpTime;
+      columnValues[rmCols.nextFollowUp] = nfVal;
+    }
+    if (opts.lastContactDate) {
+      const lcVal = { date: opts.lastContactDate };
+      if (opts.lastContactTime) lcVal.time = opts.lastContactTime;
+      columnValues[rmCols.lastContactDate] = lcVal;
+    }
+    if (opts.notes) {
+      columnValues[rmCols.notes] = { text: opts.notes };
+    }
+    if (opts.investorStatus) {
+      columnValues[rmCols.investorStatus] = { label: opts.investorStatus };
+    }
+
+    console.log(`[monday/mutations] updateRMItem: item=${itemId} cols=${JSON.stringify(columnValues)}`);
+
+    const data = await mondayApi(CHANGE_MULTIPLE_VALUES, {
+      boardId: RM_BOARD_ID,
+      itemId: String(itemId),
+      columnValues: JSON.stringify(columnValues),
+    });
+    console.log(`[monday/mutations] updateRMItem succeeded for item ${itemId}`);
+    return data;
+  } catch (err) {
+    console.error(`[monday/mutations] updateRMItem FAILED for item ${itemId}:`, err.message);
     return null;
   }
 }
@@ -529,6 +582,7 @@ module.exports = {
   updateAssignedTo,
   createInvestor,
   createFollowUpActivity,
+  updateRMItem,
   completeFollowUp,
   logCommunication,
   deleteItem,

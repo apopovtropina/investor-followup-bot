@@ -21,7 +21,7 @@ function todayFormatted() {
     year: 'numeric',
     month: 'long',
     day: 'numeric',
-    timeZone: 'America/New_York',
+    timeZone: 'America/Chicago',
   });
 }
 
@@ -31,7 +31,7 @@ function formatDateShort(date) {
     month: 'short',
     day: 'numeric',
     year: 'numeric',
-    timeZone: 'America/New_York',
+    timeZone: 'America/Chicago',
   });
 }
 
@@ -40,6 +40,29 @@ function formatCurrency(amount) {
   const num = typeof amount === 'string' ? parseFloat(amount) : amount;
   if (isNaN(num)) return '$0';
   return '$' + num.toLocaleString('en-US');
+}
+
+/**
+ * Return a formatted time string in Central Time if the time is not the
+ * default 9:00 AM (i.e. a specific time was scheduled). Returns empty string
+ * if the time is 09:00 or midnight (no time set).
+ */
+function formatTimeIfNotDefault(date) {
+  if (!date) return '';
+  const hours = date.getUTCHours !== undefined
+    ? parseInt(date.toLocaleTimeString('en-US', { hour: '2-digit', hour12: false, timeZone: 'America/Chicago' }), 10)
+    : date.getHours();
+  const minutes = parseInt(date.toLocaleTimeString('en-US', { minute: '2-digit', hour12: false, timeZone: 'America/Chicago' }), 10);
+
+  // If time is exactly 09:00 (default) or 00:00 (no time set), don't show time
+  if ((hours === 9 && minutes === 0) || (hours === 0 && minutes === 0)) return '';
+
+  return ' at ' + date.toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZone: 'America/Chicago',
+    timeZoneName: 'short',
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -105,8 +128,9 @@ function formatDailyDigest(overdue, dueToday, suggestions = {}, slackUserMap = n
     lines.push(`:calendar: *DUE TODAY (${dueToday.length}):*`);
     for (const inv of dueToday) {
       const assignee = formatAssigneeTag(inv, slackUserMap);
+      const timeStr = formatTimeIfNotDefault(inv.nextFollowUp);
       lines.push(
-        `\u2022 ${escapeSlackMrkdwn(inv.name)}${assignee} \u2014 ${escapeSlackMrkdwn(inv.status)} \u2014 ${escapeSlackMrkdwn(inv.dealInterest || 'N/A')} \u2014 <${inv.link}|Open in Monday>`
+        `\u2022 ${escapeSlackMrkdwn(inv.name)}${assignee} \u2014 ${escapeSlackMrkdwn(inv.status)} \u2014 ${escapeSlackMrkdwn(inv.dealInterest || 'N/A')}${timeStr} \u2014 <${inv.link}|Open in Monday>`
       );
     }
     lines.push('');
