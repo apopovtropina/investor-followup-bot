@@ -218,8 +218,10 @@ async function createInvestor(investor) {
     const columnValues = {};
 
     if (investor.phone) {
+      // Strip non-digits for clean phone value
+      const digitsOnly = investor.phone.replace(/\D/g, '');
       columnValues[investorCols.phone] = {
-        phone: investor.phone,
+        phone: digitsOnly,
         countryShortName: 'US',
       };
     }
@@ -229,6 +231,10 @@ async function createInvestor(investor) {
         email: investor.email,
         text: investor.email,
       };
+    }
+
+    if (investor.company) {
+      columnValues[investorCols.company] = investor.company;
     }
 
     if (investor.notes) {

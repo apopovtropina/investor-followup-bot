@@ -205,7 +205,117 @@ const REGEX_PATTERNS = {
   touchpoint: /(?:contacted|spoke\s+with|reached\s+out\s+to|just\s+(?:got\s+off|had)\s+a\s+call\s+with|had\s+a\s+meeting\s+with)\s+(.+?)(?:\s+today)?$/i,
   scheduleFollowUp: /(?:schedule\s+(?:a\s+)?follow[- ]?up|set\s+(?:a\s+)?follow[- ]?up|remind\s+me\s+to\s+(?:call|follow\s+up\s+with))(?:\s+(?:with|for)\s+(.+?))?(?:\s+(?:for|on|by|this|next|tomorrow)\s+(.+))?$/i,
   logContact: /(?:log\s+(?:a\s+)?(?:contact|touchpoint)|mark\s+(?:as\s+)?contacted)(?:\s+(?:with|for)\s+(.+?))?$/i,
+  // Scenario A: "log contact" / "add contact" / "new contact" trigger phrases
+  // Captures the trigger so we can check if there's inline info after it
+  addContactTrigger: /^(?:log\s+(?:a\s+)?contact|add\s+(?:a\s+)?contact|new\s+contact)\s*(.*)/i,
 };
+
+// ---------------------------------------------------------------------------
+// Inline contact info parser — extracts name, email, phone, LinkedIn from text
+// ---------------------------------------------------------------------------
+
+const EMAIL_PATTERN = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/;
+const PHONE_PATTERN = /(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}/;
+const LINKEDIN_PATTERN = /https?:\/\/(?:www\.)?linkedin\.com\/in\/[a-zA-Z0-9\-_%]+/i;
+
+/**
+ * Parse contact info from inline text using regex patterns.
+ * Returns { name, email, phone, linkedin, notes } or null if no name found.
+ */
+function parseContactInline(text) {
+  if (!text || !text.trim()) return null;
+
+  let remaining = text.trim();
+
+  // Extract email
+  const emailMatch = remaining.match(EMAIL_PATTERN);
+  const email = emailMatch ? emailMatch[0] : null;
+  if (email) remaining = remaining.replace(email, ' ');
+
+  // Extract LinkedIn URL
+  const linkedinMatch = remaining.match(LINKEDIN_PATTERN);
+  const linkedin = linkedinMatch ? linkedinMatch[0] : null;
+  if (linkedin) remaining = remaining.replace(linkedin, ' ');
+
+  // Extract phone number
+  const phoneMatch = remaining.match(PHONE_PATTERN);
+  const phone = phoneMatch ? phoneMatch[0].trim() : null;
+  if (phone) remaining = remaining.replace(phone, ' ');
+
+  // Clean up labels like "LinkedIn:", "Email:", "Phone:", "Tel:", etc.
+  remaining = remaining.replace(/\b(?:linkedin|email|phone|tel|mobile|cell|company|entity|org|notes?)\s*:\s*/gi, ' ');
+
+  // Clean up extra whitespace
+  remaining = remaining.replace(/\s+/g, ' ').trim();
+
+  // The remaining text should contain the name and possibly company/notes
+  // Heuristic: Name is typically the first 2-3 capitalized words
+  // Everything else is company/notes
+  if (!remaining) return null;
+
+  const words = remaining.split(/\s+/);
+  let nameParts = [];
+  let notesParts = [];
+
+  // Walk through words: name is leading words that look like name parts
+  // (capitalized, or common name patterns). Stop when we hit something
+  // that looks like a company or descriptor.
+  let inName = true;
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    // If we already have 2+ name parts and this word is lowercase or a company keyword, switch to notes
+    if (inName && nameParts.length >= 2 && (
+      /^[a-z]/.test(word) ||
+      /^(?:at|from|with|works?|of|the|and|&|inc\.?|llc|corp\.?|group|capital|real\s+estate|market|telecom|family|office|dallas|new\s+york|nyc|la|sf)$/i.test(word)
+    )) {
+      inName = false;
+    }
+    if (inName && nameParts.length < 4) {
+      nameParts.push(word);
+    } else {
+      notesParts.push(word);
+    }
+  }
+
+  const name = nameParts.join(' ');
+  const notes = notesParts.join(' ') || null;
+
+  if (!name) return null;
+
+  return { name, email, phone, linkedin, notes };
+}
+
+/**
+ * Check if a message looks like it contains contact info (Scenario B).
+ * Returns true if the message has an email or phone AND what looks like a name,
+ * AND doesn't look like a question or command about an existing investor.
+ */
+function looksLikeContactDrop(text) {
+  // Don't trigger on questions or conversational messages
+  if (/\?$/.test(text.trim())) return false;
+  if (/^(?:has\s+anyone|who'?s|what'?s|how'?s|can\s+someone|status|check|contacted|spoke|reached|schedule|remind|tell|assign)/i.test(text.trim())) return false;
+
+  const hasEmail = EMAIL_PATTERN.test(text);
+  const hasPhone = PHONE_PATTERN.test(text);
+  if (!hasEmail && !hasPhone) return false;
+
+  // Check if there's something that looks like a name (at least 2 capitalized words)
+  // Strip out the email/phone/linkedin/URLs first to check remaining text
+  let remaining = text;
+  remaining = remaining.replace(new RegExp(EMAIL_PATTERN.source, 'g'), ' ');
+  remaining = remaining.replace(new RegExp(LINKEDIN_PATTERN.source, 'gi'), ' ');
+  remaining = remaining.replace(new RegExp(PHONE_PATTERN.source, 'g'), ' ');
+  remaining = remaining.replace(/\b(?:linkedin|email|phone|tel|mobile|cell)\s*:\s*/gi, ' ');
+  remaining = remaining.replace(/\s+/g, ' ').trim();
+
+  // Need at least 2 words remaining that could be a name
+  const words = remaining.split(/\s+/).filter(w => w.length > 1);
+  if (words.length < 2) return false;
+
+  // At least the first word should start with uppercase (looks like a name)
+  const firstWordCapitalized = /^[A-Z]/.test(words[0]);
+  return firstWordCapitalized;
+}
 
 // ---------------------------------------------------------------------------
 // Intent handlers — each handles one action type
@@ -786,6 +896,76 @@ async function handleCountInvestors(say) {
 }
 
 // ---------------------------------------------------------------------------
+// NEW: Log New Contact handler — parses inline contact info and creates item
+// ---------------------------------------------------------------------------
+
+async function handleLogNewContact(text, say) {
+  try {
+    // Parse contact info from the text
+    const contact = parseContactInline(text);
+
+    if (!contact || !contact.name) {
+      // Scenario C: trigger phrase with no info — fall through to AI parser
+      await handleAddInvestor(text, say);
+      return;
+    }
+
+    // Check for duplicates
+    const existingInvestors = await getAllInvestors();
+    const duplicate = existingInvestors.length > 0
+      ? findBestMatch(contact.name, existingInvestors)
+      : null;
+
+    if (duplicate && duplicate.score <= 0.3) {
+      await say(
+        `:information_source: *${escapeSlackMrkdwn(duplicate.match.name)}* is already on the board. Did you want me to update their info or log a touchpoint? <${duplicate.match.link}|Open in Monday>`
+      );
+      return;
+    }
+
+    // Default follow-up 14 days from now
+    const followUpDate = new Date();
+    followUpDate.setDate(followUpDate.getDate() + 14);
+    const followUpStr = formatDateYMD(followUpDate);
+
+    console.log(`[slack/commands] handleLogNewContact: name="${contact.name}" email="${contact.email || 'none'}" phone="${contact.phone || 'none'}" linkedin="${contact.linkedin || 'none'}" notes="${contact.notes || 'none'}"`);
+
+    // Build notes from LinkedIn + extra notes
+    const noteLines = [];
+    if (contact.linkedin) noteLines.push(`LinkedIn: ${contact.linkedin}`);
+    // Any remaining text that wasn't name/email/phone/linkedin is company or general notes
+    // We put it in the company column AND include in notes if it exists
+
+    const created = await createInvestor({
+      name: contact.name,
+      phone: contact.phone,
+      email: contact.email,
+      company: contact.notes || null,
+      notes: noteLines.length > 0 ? noteLines.join('\n') : null,
+      nextFollowUp: followUpStr,
+    });
+
+    if (created) {
+      const details = [];
+      if (contact.email) details.push(`Email: ${contact.email}`);
+      if (contact.phone) details.push(`Phone: ${contact.phone}`);
+      if (contact.linkedin) details.push(`LinkedIn: ${contact.linkedin}`);
+
+      await say(
+        `✅ Added *${escapeSlackMrkdwn(created.name)}* to the Investor List as a Cold / New Lead. ${details.join(', ')}. Next follow-up set for ${followUpStr}. <${created.link}|Open in Monday>`
+      );
+    } else {
+      await say(
+        `:x: Failed to add *${escapeSlackMrkdwn(contact.name)}* — Monday.com update error. Please add them manually.`
+      );
+    }
+  } catch (err) {
+    console.error('[slack/commands] handleLogNewContact error:', err.message);
+    await say('Something went wrong while adding the contact. Please try again.');
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Register all command listeners
 // ---------------------------------------------------------------------------
 
@@ -838,6 +1018,37 @@ function registerCommands(app) {
         return;
       }
 
+      // ── SCENARIO A: "log contact" / "add contact" / "new contact" with inline info ──
+      const addContactTriggerMatch = text.match(REGEX_PATTERNS.addContactTrigger);
+      if (addContactTriggerMatch) {
+        const afterTrigger = (addContactTriggerMatch[1] || '').trim();
+        if (afterTrigger) {
+          // Check if the after-trigger text contains contact info (email, phone, or LinkedIn)
+          // If so, treat as Scenario A (add new contact with inline info)
+          // Otherwise, fall through to the old logContact handler (log touchpoint)
+          const hasContactInfo = EMAIL_PATTERN.test(afterTrigger) ||
+                                 PHONE_PATTERN.test(afterTrigger) ||
+                                 LINKEDIN_PATTERN.test(afterTrigger);
+
+          if (hasContactInfo) {
+            console.log(`[slack/commands] Regex match: addContactTrigger with inline contact info: "${afterTrigger}"`);
+            await handleLogNewContact(afterTrigger, say);
+            return;
+          }
+          // No contact info patterns found — fall through to logContact regex below
+          // (e.g. "log a contact with John Smith" = log touchpoint for existing investor)
+        } else {
+          // Scenario C: just the trigger phrase, no info
+          console.log('[slack/commands] Regex match: addContactTrigger with no info (Scenario C)');
+          await say(
+            "I can add a new contact! Please include the details — for example:\n" +
+            "> Log contact John Smith john@example.com 555-123-4567 Family Office\n" +
+            "I'll parse the name, email, phone, LinkedIn, and any notes automatically."
+          );
+          return;
+        }
+      }
+
       // Schedule follow-up: "schedule a follow-up", "schedule follow-up with X for Friday"
       const scheduleMatch = text.match(REGEX_PATTERNS.scheduleFollowUp);
       if (scheduleMatch) {
@@ -851,7 +1062,8 @@ function registerCommands(app) {
         return;
       }
 
-      // Log contact: "log a contact", "log a contact with X", "mark contacted X"
+      // Log contact (touchpoint for EXISTING investor): "log a contact with X", "mark contacted X"
+      // NOTE: This is for logging a touchpoint on an existing investor, NOT adding a new contact
       const logContactMatch = text.match(REGEX_PATTERNS.logContact);
       if (logContactMatch) {
         const investorName = logContactMatch[1] ? stripNamePrefix(logContactMatch[1].trim()) : null;
@@ -877,6 +1089,15 @@ function registerCommands(app) {
         const name = stripNamePrefix(touchpointMatch[1].trim());
         console.log(`[slack/commands] Regex match: touchpoint investor="${name}"`);
         await handleLogTouchpoint({ investorName: name }, message, client, say);
+        return;
+      }
+
+      // ── SCENARIO B: Auto-detect contact info in messages ──
+      // If the message contains an email or phone pattern AND a name-like string,
+      // treat it as a contact drop (no explicit trigger phrase needed)
+      if (looksLikeContactDrop(text)) {
+        console.log(`[slack/commands] Auto-detected contact info in message: "${text}"`);
+        await handleLogNewContact(text, say);
         return;
       }
 
